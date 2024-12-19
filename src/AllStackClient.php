@@ -151,8 +151,8 @@ class AllStackClient
         $stackTrace = [];
         $trace = $exception->getTrace();
         
-        foreach ($trace as $frame) {
-            $stackTrace[] = [
+        foreach ($trace as $index => $frame) {
+            $stackTrace[(string)$index] = [
                 'file' => $frame['file'] ?? '',
                 'line' => $frame['line'] ?? '',
                 'function' => $frame['function'] ?? '',
