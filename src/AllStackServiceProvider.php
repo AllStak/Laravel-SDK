@@ -8,12 +8,17 @@ class AllStackServiceProvider extends ServiceProvider
 {
     public function register()
     {
+        // Register the config file
+        $this->mergeConfigFrom(
+            __DIR__.'/../config/allstack.php', 'allstack'
+        );
+
         $this->app->singleton(AllStackClient::class, function ($app) {
-            $config = $app['config']['services.allstack'];
+            $config = $app['config']['allstack'];
             
             return new AllStackClient(
-                $config['api_key'],
-                $config['environment'] ?? app()->environment()
+                $config['api_key'] ?? env('ALLSTACK_API_KEY', ''),
+                $config['environment'] ?? env('ALLSTACK_ENVIRONMENT', app()->environment())
             );
         });
 
@@ -22,8 +27,9 @@ class AllStackServiceProvider extends ServiceProvider
 
     public function boot()
     {
+        // Publish the config file
         $this->publishes([
-            __DIR__.'/../config/allstack.php' => config_path('services.php'),
-        ]);
+            __DIR__.'/../config/allstack.php' => config_path('allstack.php')
+        ], 'allstack-config');
     }
 }
