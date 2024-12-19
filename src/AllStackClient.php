@@ -80,8 +80,10 @@ class AllStackClient
 
     private function buildBasePayload(): array
     {
+        $timestamp = now()->format('Y-m-d\TH:i:s');
+
         $payload = [
-            'timestamp' => now()->toIso8601String(),
+            'timestamp' => $timestamp,
             'environment' => $this->environment,
             'tags' => $this->tags,
             'ip' => request()->ip(),
