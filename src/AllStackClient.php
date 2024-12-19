@@ -78,6 +78,37 @@ class AllStackClient
         }
     }
 
+    private function buildHttpRequestPayload(\Illuminate\Http\Request $request): array
+    {
+        // Build a payload that exactly matches the Java DTO structure
+        return [
+            'path' => $request->path(),
+            'method' => $request->method(),
+            'headers' => $this->transformHeaders($request->headers->all()),
+            'queryParams' => $this->transformQueryParams($request->query()),
+            'body' => $this->transformRequestBody($request->all()),
+            'ip' => $request->ip(),
+            'userAgent' => $request->userAgent() ?? '',
+            'referer' => $request->header('referer') ?? '',
+            'origin' => $request->header('origin') ?? '',
+            'host' => $request->getHost(),
+            'protocol' => $request->getScheme(),
+            'hostname' => gethostname(),
+            'port' => (string) $request->getPort()
+        ];
+    }
+
+    private function buildExceptionPayload(Throwable $exception): array
+    {
+        return array_merge($this->buildBasePayload(), [
+            'errorMessage' => $exception->getMessage(),
+            'errorType' => get_class($exception),
+            'stackTrace' => $this->formatStackTrace($exception),
+            'file' => $exception->getFile(),
+            'line' => $exception->getLine(),
+        ]);
+    }
+
     private function buildBasePayload(): array
     {
         $timestamp = now()->format('Y-m-d\TH:i:s');
@@ -120,32 +151,6 @@ class AllStackClient
         return $this->addUserContext($payload);
     }
 
-    private function buildExceptionPayload(Throwable $exception): array
-    {
-        return array_merge($this->buildBasePayload(), [
-            'errorMessage' => $exception->getMessage(),
-            'errorType' => get_class($exception),
-            'stackTrace' => $this->formatStackTrace($exception),
-            'file' => $exception->getFile(),
-            'line' => $exception->getLine(),
-        ]);
-    }
-    private function buildHttpRequestPayload(\Illuminate\Http\Request $request): array
-    {
-        return array_merge($this->buildBasePayload(), [
-            'path' => $request->path(),
-            'method' => $request->method(),
-            'headers' => $request->headers->all(),
-            'queryParams' => $request->query(),
-            'body' => $this->sanitizeRequestBody($request->all()),
-            'referer' => $request->header('referer'),
-            'origin' => $request->header('origin'),
-            'host' => $request->getHost(),
-            'protocol' => $request->getScheme(),
-            'port' => $request->getPort(),
-        ]);
-    }
-
     private function formatStackTrace(Throwable $exception): array
     {
         $stackTrace = [];
@@ -164,37 +169,76 @@ class AllStackClient
         
         return $stackTrace;
     }
-    private function sanitizeRequestBody(array $data): array
+
+    private function transformHeaders(array $headers): array
+    {
+        // Headers come as arrays, we need to convert to strings for most cases
+        $transformed = [];
+        foreach ($headers as $key => $values) {
+            // If it's a single value header, store as string
+            // If multiple values, keep as array
+            $transformed[$key] = count($values) === 1 ? $values[0] : $values;
+        }
+        return $transformed;
+    }
+
+    private function transformQueryParams(array $params): array
+    {
+        // Convert all query parameters to ensure proper typing
+        return array_map(function ($value) {
+            if (is_array($value)) {
+                return $this->transformQueryParams($value);
+            }
+            // Convert boolean strings to actual booleans
+            if ($value === 'true') return true;
+            if ($value === 'false') return false;
+            // Try to convert numeric strings to numbers
+            if (is_numeric($value)) {
+                return $value * 1;
+            }
+            return $value;
+        }, $params);
+    }
+
+    private function transformRequestBody(array $data): array
     {
         $sensitiveFields = ['password', 'token', 'secret', 'credit_card'];
         
         return array_map(function ($value) use ($sensitiveFields) {
             if (is_array($value)) {
-                return $this->sanitizeRequestBody($value);
+                return $this->transformRequestBody($value);
             }
             
+            // Check for sensitive fields
             foreach ($sensitiveFields as $field) {
-                if (stripos($value, $field) !== false) {
+                if (is_string($value) && stripos($value, $field) !== false) {
                     return '[REDACTED]';
                 }
             }
             
+            // Convert types appropriately
+            if ($value === 'true') return true;
+            if ($value === 'false') return false;
+            if (is_numeric($value)) {
+                return $value * 1;
+            }
             return $value;
         }, $data);
     }
 
-    private function getHeaders(): array
-    {
-        return [
-            'x-api-key' => "{$this->apiKey}",
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-        ];
-    }
-
     private function validatePayload(array $payload): bool
     {
-        $requiredFields = ['timestamp', 'environment', 'ip'];
+        // Different required fields for different types of payloads
+        $requiredFields = [];
+        
+        // If it's an exception payload
+        if (isset($payload['errorMessage'])) {
+            $requiredFields = ['errorMessage', 'errorType', 'stackTrace'];
+        } 
+        // If it's an HTTP request payload
+        else if (isset($payload['path'])) {
+            $requiredFields = ['path', 'method', 'ip', 'host'];
+        }
         
         foreach ($requiredFields as $field) {
             if (empty($payload[$field])) {
@@ -221,7 +265,7 @@ class AllStackClient
         
         while ($attempt < $maxRetries) {
             try {
-                $this->httpClient->post(self::API_URL . $endpoint, [
+                $response = $this->httpClient->post(self::API_URL . $endpoint, [
                     'headers' => $this->getHeaders(),
                     'json' => $payload,
                 ]);
@@ -238,6 +282,15 @@ class AllStackClient
         }
         
         return false;
+    }
+
+    private function getHeaders(): array
+    {
+        return [
+            'x-api-key' => "{$this->apiKey}",
+            'Content-Type' => 'application/json',
+            'Accept' => 'application/json',
+        ];
     }
 
     private function addUserContext(array $payload): array
