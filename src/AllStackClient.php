@@ -126,9 +126,10 @@ class AllStackClient
             'errorMessage' => $exception->getMessage(),
             'errorType' => get_class($exception),
             'stackTrace' => $this->formatStackTrace($exception),
+            'file' => $exception->getFile(),
+            'line' => $exception->getLine(),
         ]);
     }
-
     private function buildHttpRequestPayload(\Illuminate\Http\Request $request): array
     {
         return array_merge($this->buildBasePayload(), [
