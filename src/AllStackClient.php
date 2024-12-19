@@ -152,7 +152,8 @@ class AllStackClient
         $trace = $exception->getTrace();
         
         foreach ($trace as $index => $frame) {
-            $stackTrace[(string)$index] = [
+            $frameKey = sprintf("frame_%d", $index);
+            $stackTrace[$frameKey] = [
                 'file' => $frame['file'] ?? '',
                 'line' => $frame['line'] ?? '',
                 'function' => $frame['function'] ?? '',
@@ -163,7 +164,6 @@ class AllStackClient
         
         return $stackTrace;
     }
-
     private function sanitizeRequestBody(array $data): array
     {
         $sensitiveFields = ['password', 'token', 'secret', 'credit_card'];
