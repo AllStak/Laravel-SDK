@@ -16,7 +16,6 @@ class AllStackClient
     private string $environment;
     private Client $httpClient;
     private RateLimiter $rateLimiter;
-    private array $tags = [];
 
     public function __construct(string $apiKey, string $environment = 'production')
     {
@@ -28,12 +27,6 @@ class AllStackClient
             'http_errors' => true
         ]);
         $this->rateLimiter = app(RateLimiter::class);
-    }
-
-    public function setTag(string $key, string $value): self
-    {
-        $this->tags[$key] = $value;
-        return $this;
     }
 
     public function captureException(Throwable $exception): bool
@@ -67,6 +60,8 @@ class AllStackClient
         try {
             $payload = $this->buildHttpRequestPayload($request);
             
+            Log::debug('Request payload built', ['payload' => $payload]); // Debug log
+            
             if (!$this->validatePayload($payload)) {
                 return false;
             }
@@ -80,13 +75,23 @@ class AllStackClient
 
     private function buildHttpRequestPayload(\Illuminate\Http\Request $request): array
     {
-        // Build a payload that exactly matches the Java DTO structure
+        $headers = $this->transformHeaders($request->headers->all());
+        $queryParams = $this->transformQueryParams($request->query());
+        $body = $this->transformRequestBody($request->all());
+
+        // Debug logs
+        Log::debug('Building HTTP request payload', [
+            'path' => $request->path(),
+            'headers' => $headers,
+            'queryParams' => $queryParams
+        ]);
+
         return [
             'path' => $request->path(),
             'method' => $request->method(),
-            'headers' => $this->transformHeaders($request->headers->all()),
-            'queryParams' => $this->transformQueryParams($request->query()),
-            'body' => $this->transformRequestBody($request->all()),
+            'headers' => (object)$headers,
+            'queryParams' => (object)$queryParams,
+            'body' => (object)$body,
             'ip' => $request->ip(),
             'userAgent' => $request->userAgent() ?? '',
             'referer' => $request->header('referer') ?? '',
@@ -94,61 +99,19 @@ class AllStackClient
             'host' => $request->getHost(),
             'protocol' => $request->getScheme(),
             'hostname' => gethostname(),
-            'port' => (string) $request->getPort()
+            'port' => (string)$request->getPort()
         ];
     }
 
     private function buildExceptionPayload(Throwable $exception): array
     {
-        return array_merge($this->buildBasePayload(), [
+        return [
             'errorMessage' => $exception->getMessage(),
             'errorType' => get_class($exception),
-            'stackTrace' => $this->formatStackTrace($exception),
+            'stackTrace' => (object)$this->formatStackTrace($exception),
             'file' => $exception->getFile(),
             'line' => $exception->getLine(),
-        ]);
-    }
-
-    private function buildBasePayload(): array
-    {
-        $timestamp = now()->format('Y-m-d\TH:i:s');
-
-        $payload = [
-            'timestamp' => $timestamp,
-            'environment' => $this->environment,
-            'tags' => $this->tags,
-            'ip' => request()->ip(),
-            'userAgent' => request()->userAgent() ?? '',
-            'hostname' => gethostname(),
-            'additionalData' => [
-                'hostname' => gethostname(),
-                'memoryUsage' => [
-                    'rss' => memory_get_usage(true),
-                    'heapTotal' => memory_get_peak_usage(true),
-                    'heapUsed' => memory_get_usage(),
-                ],
-                'uptime' => time() - LARAVEL_START,
-            ],
-            'contexts' => [
-                'runtime' => [
-                    'name' => 'PHP',
-                    'version' => PHP_VERSION,
-                ],
-                'system' => [
-                    'platform' => PHP_OS,
-                    'release' => php_uname('r'),
-                    'cpu' => php_uname('m'),
-                ],
-                'process' => [
-                    'pid' => getmypid(),
-                    'argv' => $_SERVER['argv'] ?? [],
-                    'execPath' => PHP_BINARY,
-                    'cwd' => getcwd(),
-                ],
-            ],
         ];
-
-        return $this->addUserContext($payload);
     }
 
     private function formatStackTrace(Throwable $exception): array
@@ -172,77 +135,97 @@ class AllStackClient
 
     private function transformHeaders(array $headers): array
     {
-        // Headers come as arrays, we need to convert to strings for most cases
         $transformed = [];
+        
         foreach ($headers as $key => $values) {
-            // If it's a single value header, store as string
-            // If multiple values, keep as array
-            $transformed[$key] = count($values) === 1 ? $values[0] : $values;
+            // Convert array of values to comma-separated string
+            if (is_array($values)) {
+                $transformed[strtolower($key)] = implode(', ', $values);
+            } else {
+                $transformed[strtolower($key)] = $values;
+            }
         }
+        
+        Log::debug('Transformed headers', ['headers' => $transformed]); // Debug log
         return $transformed;
     }
 
     private function transformQueryParams(array $params): array
     {
-        // Convert all query parameters to ensure proper typing
-        return array_map(function ($value) {
+        $transformed = [];
+        
+        foreach ($params as $key => $value) {
             if (is_array($value)) {
-                return $this->transformQueryParams($value);
+                // Convert array values to comma-separated strings
+                $transformed[$key] = implode(',', $value);
+            } else {
+                // Convert primitive values appropriately
+                if ($value === 'true') {
+                    $transformed[$key] = true;
+                } elseif ($value === 'false') {
+                    $transformed[$key] = false;
+                } elseif (is_numeric($value)) {
+                    $transformed[$key] = $value * 1;
+                } else {
+                    $transformed[$key] = $value;
+                }
             }
-            // Convert boolean strings to actual booleans
-            if ($value === 'true') return true;
-            if ($value === 'false') return false;
-            // Try to convert numeric strings to numbers
-            if (is_numeric($value)) {
-                return $value * 1;
-            }
-            return $value;
-        }, $params);
+        }
+        
+        Log::debug('Transformed query params', ['params' => $transformed]); // Debug log
+        return $transformed;
     }
 
     private function transformRequestBody(array $data): array
     {
+        $transformed = [];
         $sensitiveFields = ['password', 'token', 'secret', 'credit_card'];
         
-        return array_map(function ($value) use ($sensitiveFields) {
+        foreach ($data as $key => $value) {
             if (is_array($value)) {
-                return $this->transformRequestBody($value);
-            }
-            
-            // Check for sensitive fields
-            foreach ($sensitiveFields as $field) {
-                if (is_string($value) && stripos($value, $field) !== false) {
-                    return '[REDACTED]';
+                $transformed[$key] = $this->transformRequestBody($value);
+            } else {
+                // Check for sensitive fields
+                foreach ($sensitiveFields as $field) {
+                    if (stripos($key, $field) !== false) {
+                        $value = '[REDACTED]';
+                        break;
+                    }
+                }
+                
+                // Convert types appropriately
+                if ($value === 'true') {
+                    $transformed[$key] = true;
+                } elseif ($value === 'false') {
+                    $transformed[$key] = false;
+                } elseif (is_numeric($value)) {
+                    $transformed[$key] = $value * 1;
+                } else {
+                    $transformed[$key] = $value;
                 }
             }
-            
-            // Convert types appropriately
-            if ($value === 'true') return true;
-            if ($value === 'false') return false;
-            if (is_numeric($value)) {
-                return $value * 1;
-            }
-            return $value;
-        }, $data);
+        }
+        
+        return $transformed;
     }
 
     private function validatePayload(array $payload): bool
     {
-        // Different required fields for different types of payloads
-        $requiredFields = [];
-        
-        // If it's an exception payload
-        if (isset($payload['errorMessage'])) {
-            $requiredFields = ['errorMessage', 'errorType', 'stackTrace'];
-        } 
-        // If it's an HTTP request payload
-        else if (isset($payload['path'])) {
+        // Required fields for HTTP request
+        if (isset($payload['path'])) {
             $requiredFields = ['path', 'method', 'ip', 'host'];
+        }
+        // Required fields for exception
+        else if (isset($payload['errorMessage'])) {
+            $requiredFields = ['errorMessage', 'errorType', 'stackTrace'];
+        } else {
+            Log::warning('Unknown payload type');
+            return false;
         }
         
         foreach ($requiredFields as $field) {
             if (empty($payload[$field])) {
-                Log::warning("Missing required field: {$field}");
+                Log::warning("Missing required field: {$field}", ['payload' => $payload]);
                 return false;
             }
         }
@@ -263,16 +246,33 @@ class AllStackClient
     {
         $attempt = 0;
         
+        // Log the final payload for debugging
+        Log::debug('Sending payload to AllStack', [
+            'endpoint' => $endpoint,
+            'payload' => $payload,
+            'attempt' => $attempt + 1
+        ]);
+        
         while ($attempt < $maxRetries) {
             try {
                 $response = $this->httpClient->post(self::API_URL . $endpoint, [
                     'headers' => $this->getHeaders(),
                     'json' => $payload,
                 ]);
-                Log::info('Successfully sent to AllStack');
+                
+                Log::info('Successfully sent to AllStack', [
+                    'endpoint' => $endpoint,
+                    'status' => $response->getStatusCode()
+                ]);
                 return true;
             } catch (\Exception $e) {
                 $attempt++;
+                Log::error('Failed to send to AllStack', [
+                    'endpoint' => $endpoint,
+                    'attempt' => $attempt,
+                    'error' => $e->getMessage()
+                ]);
+                
                 if ($attempt === $maxRetries) {
                     Log::error("Failed after {$maxRetries} attempts: " . $e->getMessage());
                     return false;
@@ -291,17 +291,5 @@ class AllStackClient
             'Content-Type' => 'application/json',
             'Accept' => 'application/json',
         ];
-    }
-
-    private function addUserContext(array $payload): array
-    {
-        if (auth()->check()) {
-            $payload['user'] = [
-                'id' => auth()->id(),
-                'email' => auth()->user()->email ?? null,
-            ];
-        }
-        
-        return $payload;
     }
 }
