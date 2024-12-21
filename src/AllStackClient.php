@@ -53,19 +53,19 @@ class AllStackClient
                 'environment'  => $this->environment,
                 'ip'           => $this->getIpAddress(),
                 'userAgent'    => 'Laravel', // or anything you prefer
-                'url'          => '',        // No URL for a plain exception (unless you have it)
+                'url'          => '',        // For a plain exception, we often don't have a URL
                 'timestamp'    => $this->formatTimestamp(now()),
-                
+
                 // Additional structured data
                 'additionalData' => [
                     'file'     => $exception->getFile(),
                     'line'     => $exception->getLine(),
                     'trace'    => $exception->getTraceAsString(),
                     'hostname' => gethostname(),
-                    // You can add more debug info or system metrics below
                 ],
+                // Our newly formatted stack trace
                 'stackTrace' => (object) $this->formatStackTrace($exception),
-                
+
                 // Optional contexts or dynamic details
                 'contexts' => $this->createContexts(),
 
@@ -79,7 +79,7 @@ class AllStackClient
                 'memoryUsage'   => $this->getMemoryUsage(),
                 'cpuUsage'      => null, // Not trivial in PHP
                 'responseTime'  => 0,
-                'tags'          => [],   // Possibly fill from config or pass in
+                'tags'          => [],
                 'errorSeverity' => $errorSeverity,
             ];
 
@@ -112,7 +112,6 @@ class AllStackClient
             $errorSeverity = 'low';
             $errorLevel    = 'WARNING';
 
-            // Build final payload that matches your Node/Java style
             $payload = [
                 'errorMessage' => 'HTTP Request Captured',
                 'errorType'    => 'HTTPRequest',
@@ -123,7 +122,6 @@ class AllStackClient
                 'url'          => $request->fullUrl(),
                 'timestamp'    => $this->formatTimestamp(now()),
 
-                // Combine request details + system metrics in additionalData
                 'additionalData' => [
                     'headers'     => $this->transformHeaders($request->headers->all()),
                     'queryParams' => $this->transformQueryParams($request->query()),
@@ -134,10 +132,12 @@ class AllStackClient
                     'hostname'    => gethostname(),
                     'port'        => (string) $request->getPort(),
                 ],
-                'stackTrace' => new \stdClass(), // Typically empty for request logging
+                // For an HTTP request, we don't typically have a PHP "stack trace",
+                // so we make it an empty object (or omit it if you prefer).
+                'stackTrace' => new \stdClass(),
                 'contexts'   => $this->createContexts(),
 
-                // Example optional fields
+                // Optional fields
                 'release'       => env('RELEASE', '1.0.0'),
                 'component'     => env('COMPONENT', 'my-component'),
                 'transactionId' => '',
@@ -145,9 +145,9 @@ class AllStackClient
                 'rootCause'     => '',
                 'category'      => '',
                 'memoryUsage'   => $this->getMemoryUsage(),
-                'cpuUsage'      => null, // Not trivial in PHP
+                'cpuUsage'      => null,
                 'responseTime'  => $responseTime,
-                'tags'          => [],   // Possibly fill from config
+                'tags'          => [],
                 'errorSeverity' => $errorSeverity,
             ];
 
@@ -165,17 +165,54 @@ class AllStackClient
     }
 
     /**
-     * ---------------------------------------
+     * ------------------------------------------------
      * Below are helper methods & transformations
-     * ---------------------------------------
+     * ------------------------------------------------
      */
+
+    /**
+     * Format a PHP stack trace as "frame0", "frame1", etc.
+     * If we can parse "file" and "line" from the line, we do so;
+     * otherwise, we store a "raw" key.
+     *
+     * Note: PHP doesn't store a "column" in stack traces, so we set it to 0 by default.
+     */
+    private function formatStackTrace(Throwable $exception): array
+    {
+        // Get the raw trace as a string, then split into lines
+        $rawTrace = $exception->getTraceAsString();
+        $lines    = preg_split('/\r\n|\n|\r/', $rawTrace);
+
+        $frames = [];
+
+        // A naive regex for lines like:
+        // #0 /path/to/file(123): SomeClass->someMethod()
+        // This won't be identical for every environment, so adjust as needed.
+        $regex = '/#\d+\s+(?<file>[^()]+)\((?<line>\d+)\):\s+(?<fn>[^\s]+)/';
+
+        foreach ($lines as $index => $line) {
+            if (preg_match($regex, $line, $matches)) {
+                // We have a file, line, and a "function" (fn). Column doesn't exist in typical PHP traces.
+                $frames['frame' . $index] = [
+                    'file'     => trim($matches['file']),
+                    'line'     => (int)$matches['line'],
+                    'column'   => 0,
+                    'function' => $matches['fn']
+                ];
+            } else {
+                // If the line doesn't match, just store it as raw.
+                $frames['frame' . $index] = ['raw' => $line];
+            }
+        }
+
+        return $frames;
+    }
 
     /**
      * Very simplified approach to "severity" mapping (like in Node SDK).
      */
     private function determineErrorSeverity(Throwable $exception): string
     {
-        // Simple example mapping
         if ($exception instanceof \TypeError || $exception instanceof \ErrorException) {
             return 'high';
         }
@@ -194,34 +231,10 @@ class AllStackClient
      */
     private function determineErrorLevel(string $type, string $severity): string
     {
-        // Node logic: if type=error & severity=critical => CRITICAL else ERROR
-        // if type=warning & severity=critical => CRITICAL else WARNING
         if ($type === 'error') {
             return $severity === 'critical' ? 'CRITICAL' : 'ERROR';
         }
         return $severity === 'critical' ? 'CRITICAL' : 'WARNING';
-    }
-
-    /**
-     * Format a stack trace as an array of frames (similar to Node approach).
-     */
-    private function formatStackTrace(Throwable $exception): array
-    {
-        $stackTrace = [];
-        $trace      = $exception->getTrace();
-
-        foreach ($trace as $index => $frame) {
-            $frameKey = sprintf("frame_%d", $index);
-            $stackTrace[$frameKey] = [
-                'file'     => $frame['file']     ?? '',
-                'line'     => $frame['line']     ?? '',
-                'function' => $frame['function'] ?? '',
-                'class'    => $frame['class']    ?? '',
-                'type'     => $frame['type']     ?? '',
-            ];
-        }
-
-        return $stackTrace;
     }
 
     /**
@@ -235,7 +248,7 @@ class AllStackClient
                 'version' => PHP_VERSION
             ],
             'system' => [
-                'os'   => PHP_OS,  // e.g., 'Linux'
+                'os'    => PHP_OS,  // e.g., "Linux"
                 'uname' => php_uname(),
             ],
             'process' => [
@@ -268,7 +281,6 @@ class AllStackClient
      */
     private function getIpAddress(): string
     {
-        // If you are in a CLI context, there's no real IP, so fallback to gethostname().
         return gethostbyname(gethostname());
     }
 
@@ -373,7 +385,8 @@ class AllStackClient
         }
 
         foreach ($requiredFields as $field) {
-            if (empty($payload[$field]) && $payload[$field] !== 0) {
+            // We allow "0" or false, so we only fail if it's truly empty
+            if ($payload[$field] === null || $payload[$field] === '') {
                 Log::warning("Missing required field: {$field}", ['payload' => $payload]);
                 return false;
             }
