@@ -47,27 +47,25 @@ class AllStackClient
 
             // 2. Build final payload
             $payload = [
-                'errorMessage' => $exception->getMessage() ?: 'Unknown Exception',
-                'errorType'    => get_class($exception),
-                'errorLevel'   => $errorLevel,
-                'environment'  => $this->environment,
-                'ip'           => $this->getIpAddress(),
-                'userAgent'    => 'Laravel', // or anything you prefer
-                'url'          => '',        // For a plain exception, we often don't have a URL
-                'timestamp'    => $this->formatTimestamp(now()),
-
-                // Additional structured data
+                'errorMessage'   => $exception->getMessage() ?: 'Unknown Exception',
+                'errorType'      => get_class($exception),
+                'errorLevel'     => $errorLevel,
+                'environment'    => $this->environment,
+                'ip'             => $this->getIpAddress(),
+                'userAgent'      => 'Laravel',
+                'url'            => '',
+                'timestamp'      => $this->formatTimestamp(now()),
                 'additionalData' => [
                     'file'     => $exception->getFile(),
                     'line'     => $exception->getLine(),
                     'trace'    => $exception->getTraceAsString(),
                     'hostname' => gethostname(),
                 ],
-                // Our newly formatted stack trace
-                'stackTrace' => (object) $this->formatStackTrace($exception),
+                'stackTrace'    => (object) $this->formatStackTrace($exception),
+                'contexts'      => $this->createContexts(),
 
-                // Optional contexts or dynamic details
-                'contexts' => $this->createContexts(),
+                // The new errorCategory field
+                'errorCategory' => $this->determineErrorCategory($exception),
 
                 // Example optional fields (match your Java DTO)
                 'release'       => env('RELEASE', '1.0.0'),
@@ -75,9 +73,9 @@ class AllStackClient
                 'transactionId' => '',
                 'fingerprint'   => '',
                 'rootCause'     => '',
-                'category'      => '',
+                'category'      => '',  // This might overlap with errorCategory; feel free to remove
                 'memoryUsage'   => $this->getMemoryUsage(),
-                'cpuUsage'      => null, // Not trivial in PHP
+                'cpuUsage'      => null,
                 'responseTime'  => 0,
                 'tags'          => [],
                 'errorSeverity' => $errorSeverity,
@@ -113,15 +111,14 @@ class AllStackClient
             $errorLevel    = 'WARNING';
 
             $payload = [
-                'errorMessage' => 'HTTP Request Captured',
-                'errorType'    => 'HTTPRequest',
-                'errorLevel'   => $errorLevel,
-                'environment'  => $this->environment,
-                'ip'           => $request->ip(),
-                'userAgent'    => $request->userAgent() ?? 'unknown',
-                'url'          => $request->fullUrl(),
-                'timestamp'    => $this->formatTimestamp(now()),
-
+                'errorMessage'   => 'HTTP Request Captured',
+                'errorType'      => 'HTTPRequest',
+                'errorLevel'     => $errorLevel,
+                'environment'    => $this->environment,
+                'ip'             => $request->ip(),
+                'userAgent'      => $request->userAgent() ?? 'unknown',
+                'url'            => $request->fullUrl(),
+                'timestamp'      => $this->formatTimestamp(now()),
                 'additionalData' => [
                     'headers'     => $this->transformHeaders($request->headers->all()),
                     'queryParams' => $this->transformQueryParams($request->query()),
@@ -132,10 +129,13 @@ class AllStackClient
                     'hostname'    => gethostname(),
                     'port'        => (string) $request->getPort(),
                 ],
-                // For an HTTP request, we don't typically have a PHP "stack trace",
-                // so we make it an empty object (or omit it if you prefer).
-                'stackTrace' => new \stdClass(),
-                'contexts'   => $this->createContexts(),
+                'stackTrace'    => new \stdClass(), // Typically empty for request logging
+                'contexts'      => $this->createContexts(),
+
+                // The new errorCategory field
+                // For a request capture, you might always default to APPLICATION_ERROR
+                // or your own logic:
+                'errorCategory' => 'APPLICATION_ERROR',
 
                 // Optional fields
                 'release'       => env('RELEASE', '1.0.0'),
@@ -165,47 +165,41 @@ class AllStackClient
     }
 
     /**
-     * ------------------------------------------------
+     * ---------------------------------------
      * Below are helper methods & transformations
-     * ------------------------------------------------
+     * ---------------------------------------
      */
 
     /**
-     * Format a PHP stack trace as "frame0", "frame1", etc.
-     * If we can parse "file" and "line" from the line, we do so;
-     * otherwise, we store a "raw" key.
+     * We add a method to figure out which of the Java enum categories
+     * might match this PHP Throwable.
      *
-     * Note: PHP doesn't store a "column" in stack traces, so we set it to 0 by default.
+     * APPLICATION_ERROR, NETWORK_ERROR, DATABASE_ERROR,
+     * SECURITY_ERROR, PERFORMANCE_ERROR, UNKNOWN_ERROR
      */
-    private function formatStackTrace(Throwable $exception): array
+    private function determineErrorCategory(Throwable $exception): string
     {
-        // Get the raw trace as a string, then split into lines
-        $rawTrace = $exception->getTraceAsString();
-        $lines    = preg_split('/\r\n|\n|\r/', $rawTrace);
+        $message = strtolower($exception->getMessage());
 
-        $frames = [];
-
-        // A naive regex for lines like:
-        // #0 /path/to/file(123): SomeClass->someMethod()
-        // This won't be identical for every environment, so adjust as needed.
-        $regex = '/#\d+\s+(?<file>[^()]+)\((?<line>\d+)\):\s+(?<fn>[^\s]+)/';
-
-        foreach ($lines as $index => $line) {
-            if (preg_match($regex, $line, $matches)) {
-                // We have a file, line, and a "function" (fn). Column doesn't exist in typical PHP traces.
-                $frames['frame' . $index] = [
-                    'file'     => trim($matches['file']),
-                    'line'     => (int)$matches['line'],
-                    'column'   => 0,
-                    'function' => $matches['fn']
-                ];
-            } else {
-                // If the line doesn't match, just store it as raw.
-                $frames['frame' . $index] = ['raw' => $line];
-            }
+        // Very naive heuristics, adjust as needed:
+        if (str_contains($message, 'sql') || str_contains($message, 'db') || str_contains($message, 'database')) {
+            return 'DATABASE_ERROR';
+        }
+        if (str_contains($message, 'network') || str_contains($message, 'timeout') || str_contains($message, 'socket')) {
+            return 'NETWORK_ERROR';
+        }
+        if (str_contains($message, 'security') || str_contains($message, 'unauthorized') || str_contains($message, 'forbidden')) {
+            return 'SECURITY_ERROR';
+        }
+        if (str_contains($message, 'performance') || str_contains($message, 'slow')) {
+            return 'PERFORMANCE_ERROR';
+        }
+        if (str_contains($message, 'app') || str_contains($message, 'logic') || str_contains($message, 'handler')) {
+            return 'APPLICATION_ERROR';
         }
 
-        return $frames;
+        // If none of the above matched:
+        return 'UNKNOWN_ERROR';
     }
 
     /**
@@ -238,6 +232,28 @@ class AllStackClient
     }
 
     /**
+     * Format a stack trace as an array of frames (similar to Node approach).
+     */
+    private function formatStackTrace(Throwable $exception): array
+    {
+        $stackTrace = [];
+        $trace      = $exception->getTrace();
+
+        foreach ($trace as $index => $frame) {
+            $frameKey = sprintf("frame_%d", $index);
+            $stackTrace[$frameKey] = [
+                'file'     => $frame['file']     ?? '',
+                'line'     => $frame['line']     ?? '',
+                'function' => $frame['function'] ?? '',
+                'class'    => $frame['class']    ?? '',
+                'type'     => $frame['type']     ?? '',
+            ];
+        }
+
+        return $stackTrace;
+    }
+
+    /**
      * Minimal "contexts" to mimic Node’s "runtime/system/process" concept.
      */
     private function createContexts(): array
@@ -248,19 +264,17 @@ class AllStackClient
                 'version' => PHP_VERSION
             ],
             'system' => [
-                'os'    => PHP_OS,  // e.g., "Linux"
+                'os'    => PHP_OS,
                 'uname' => php_uname(),
             ],
             'process' => [
                 'pid' => getmypid(),
-                // Add anything else relevant to your environment
             ],
         ];
     }
 
     /**
      * Approximate memory usage in bytes (for the current PHP process).
-     * We skip CPU usage because PHP has no simple built-in for system-level CPU usage.
      */
     private function getMemoryUsage(): int
     {
@@ -268,8 +282,7 @@ class AllStackClient
     }
 
     /**
-     * Formats timestamp to match your Java LocalDateTime parsing (ISO-like).
-     * E.g., "2024-12-21T21:54:16"
+     * Formats timestamp in ISO-like format suitable for Java LocalDateTime parsing.
      */
     private function formatTimestamp(\DateTimeInterface $dt): string
     {
@@ -277,22 +290,18 @@ class AllStackClient
     }
 
     /**
-     * Attempt to get a "real" IP address (fallback is the hostname IP).
+     * Attempt to get a "real" IP address (fallback is the hostname IP if CLI).
      */
     private function getIpAddress(): string
     {
         return gethostbyname(gethostname());
     }
 
-    /**
-     * Transform request headers into a flatter structure (already in your code).
-     */
     private function transformHeaders(array $headers): array
     {
         $transformed = [];
         
         foreach ($headers as $key => $values) {
-            // Convert array of values to comma-separated string
             if (is_array($values)) {
                 $transformed[strtolower($key)] = implode(', ', $values);
             } else {
@@ -304,9 +313,6 @@ class AllStackClient
         return $transformed;
     }
 
-    /**
-     * Transform query params to typed values (already in your code).
-     */
     private function transformQueryParams(array $params): array
     {
         $transformed = [];
@@ -331,9 +337,6 @@ class AllStackClient
         return $transformed;
     }
 
-    /**
-     * Transform request body, redacting sensitive fields (already in your code).
-     */
     private function transformRequestBody(array $data): array
     {
         $transformed = [];
@@ -343,14 +346,12 @@ class AllStackClient
             if (is_array($value)) {
                 $transformed[$key] = $this->transformRequestBody($value);
             } else {
-                // Check for sensitive fields
                 foreach ($sensitiveFields as $field) {
                     if (stripos($key, $field) !== false) {
                         $value = '[REDACTED]';
                         break;
                     }
                 }
-                // Convert types
                 if ($value === 'true') {
                     $transformed[$key] = true;
                 } elseif ($value === 'false') {
@@ -368,16 +369,14 @@ class AllStackClient
 
     /**
      * Basic validation to ensure required fields are present.
-     * Adjust as you see fit.
      */
     private function validatePayload(array $payload): bool
     {
-        // Distinguish between "request" or "exception" type based on certain fields
         if (isset($payload['errorMessage']) && isset($payload['errorType'])) {
             // Exception or generic event
             $requiredFields = ['errorMessage', 'errorType', 'errorLevel', 'environment', 'timestamp'];
         } elseif (isset($payload['errorMessage']) && $payload['errorType'] === 'HTTPRequest') {
-            // We decided to name it "HTTPRequest" for request events
+            // Request
             $requiredFields = ['errorMessage', 'errorType', 'environment', 'timestamp', 'url'];
         } else {
             Log::warning('Unknown payload type', ['payload' => $payload]);
@@ -385,7 +384,6 @@ class AllStackClient
         }
 
         foreach ($requiredFields as $field) {
-            // We allow "0" or false, so we only fail if it's truly empty
             if ($payload[$field] === null || $payload[$field] === '') {
                 Log::warning("Missing required field: {$field}", ['payload' => $payload]);
                 return false;
@@ -395,9 +393,6 @@ class AllStackClient
         return true;
     }
 
-    /**
-     * Prevent spamming the API beyond a certain rate.
-     */
     private function shouldThrottle(): bool
     {
         return !$this->rateLimiter->attempt(
@@ -410,13 +405,12 @@ class AllStackClient
     }
 
     /**
-     * Send data with simple retry logic (similar to Node’s exponential backoff).
+     * Send data with simple retry logic.
      */
     private function sendWithRetry(string $endpoint, array $payload, int $maxRetries = 3): bool
     {
         $attempt = 0;
 
-        // Log the final payload for debugging
         Log::debug('Sending payload to AllStack', [
             'endpoint' => $endpoint,
             'payload'  => $payload,
@@ -447,16 +441,13 @@ class AllStackClient
                     Log::error("Failed after {$maxRetries} attempts: " . $e->getMessage());
                     return false;
                 }
-                sleep(1); // Wait 1 second before retrying
+                sleep(1);
             }
         }
 
         return false;
     }
 
-    /**
-     * Basic headers required by your API.
-     */
     private function getHeaders(): array
     {
         return [
