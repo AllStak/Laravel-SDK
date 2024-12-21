@@ -64,8 +64,10 @@ class AllStackClient
                 'stackTrace'    => (object) $this->formatStackTrace($exception),
                 'contexts'      => $this->createContexts(),
 
-                // The new errorCategory field
+                // new field
                 'errorCategory' => $this->determineErrorCategory($exception),
+                // new field for cause
+                'errorCause'    => $this->determineErrorCause($exception),
 
                 // Example optional fields (match your Java DTO)
                 'release'       => env('RELEASE', '1.0.0'),
@@ -73,7 +75,7 @@ class AllStackClient
                 'transactionId' => '',
                 'fingerprint'   => '',
                 'rootCause'     => '',
-                'category'      => '',  // This might overlap with errorCategory; feel free to remove
+                'category'      => '',
                 'memoryUsage'   => $this->getMemoryUsage(),
                 'cpuUsage'      => null,
                 'responseTime'  => 0,
@@ -129,13 +131,13 @@ class AllStackClient
                     'hostname'    => gethostname(),
                     'port'        => (string) $request->getPort(),
                 ],
-                'stackTrace'    => new \stdClass(), // Typically empty for request logging
+                'stackTrace'    => new \stdClass(),
                 'contexts'      => $this->createContexts(),
 
-                // The new errorCategory field
-                // For a request capture, you might always default to APPLICATION_ERROR
-                // or your own logic:
+                // We default requests to 'APPLICATION_ERROR' or similar
                 'errorCategory' => 'APPLICATION_ERROR',
+                // For requests, we might default 'USER' or do logic if certain status codes = user error
+                'errorCause'    => 'USER',
 
                 // Optional fields
                 'release'       => env('RELEASE', '1.0.0'),
@@ -165,15 +167,33 @@ class AllStackClient
     }
 
     /**
-     * ---------------------------------------
-     * Below are helper methods & transformations
-     * ---------------------------------------
+     * -------------------------------
+     * Helper methods & transformations
+     * -------------------------------
      */
 
     /**
-     * We add a method to figure out which of the Java enum categories
-     * might match this PHP Throwable.
-     *
+     * New method to decide if the error is caused by the user or by the system.
+     */
+    private function determineErrorCause(Throwable $exception): string
+    {
+        // Example heuristics, tailor to your logic
+        $msg = strtolower($exception->getMessage());
+        // If the message mentions invalid input, we consider it user-caused.
+        if (str_contains($msg, 'validation') || str_contains($msg, 'input')) {
+            return 'USER';
+        }
+        // If it mentions DB connection, server crash, etc., we consider it system-caused.
+        if (str_contains($msg, 'db') || str_contains($msg, 'server') || str_contains($msg, 'connection')) {
+            return 'SYSTEM';
+        }
+
+        // Fallback
+        return 'SYSTEM';
+    }
+
+    /**
+     * We add a method to figure out which of the Java enum categories might match this PHP Throwable.
      * APPLICATION_ERROR, NETWORK_ERROR, DATABASE_ERROR,
      * SECURITY_ERROR, PERFORMANCE_ERROR, UNKNOWN_ERROR
      */
@@ -198,7 +218,6 @@ class AllStackClient
             return 'APPLICATION_ERROR';
         }
 
-        // If none of the above matched:
         return 'UNKNOWN_ERROR';
     }
 
@@ -273,25 +292,16 @@ class AllStackClient
         ];
     }
 
-    /**
-     * Approximate memory usage in bytes (for the current PHP process).
-     */
     private function getMemoryUsage(): int
     {
         return memory_get_usage(true);
     }
 
-    /**
-     * Formats timestamp in ISO-like format suitable for Java LocalDateTime parsing.
-     */
     private function formatTimestamp(\DateTimeInterface $dt): string
     {
         return $dt->format('Y-m-d\TH:i:s');
     }
 
-    /**
-     * Attempt to get a "real" IP address (fallback is the hostname IP if CLI).
-     */
     private function getIpAddress(): string
     {
         return gethostbyname(gethostname());
@@ -367,16 +377,11 @@ class AllStackClient
         return $transformed;
     }
 
-    /**
-     * Basic validation to ensure required fields are present.
-     */
     private function validatePayload(array $payload): bool
     {
         if (isset($payload['errorMessage']) && isset($payload['errorType'])) {
-            // Exception or generic event
             $requiredFields = ['errorMessage', 'errorType', 'errorLevel', 'environment', 'timestamp'];
         } elseif (isset($payload['errorMessage']) && $payload['errorType'] === 'HTTPRequest') {
-            // Request
             $requiredFields = ['errorMessage', 'errorType', 'environment', 'timestamp', 'url'];
         } else {
             Log::warning('Unknown payload type', ['payload' => $payload]);
@@ -404,9 +409,6 @@ class AllStackClient
         );
     }
 
-    /**
-     * Send data with simple retry logic.
-     */
     private function sendWithRetry(string $endpoint, array $payload, int $maxRetries = 3): bool
     {
         $attempt = 0;
