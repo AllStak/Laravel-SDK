@@ -60,6 +60,12 @@ class AllStackClient
                     'line'     => $exception->getLine(),
                     'trace'    => $exception->getTraceAsString(),
                     'hostname' => gethostname(),
+                    // NEW: Capture code snippet
+                    'codeContext' => $this->getCodeContext(
+                        $exception->getFile(), 
+                        $exception->getLine(), 
+                        5 // number of lines of context on each side
+                    ), 
                 ],
                 'stackTrace'    => (object) $this->formatStackTrace($exception),
                 'contexts'      => $this->createContexts(),
@@ -95,6 +101,35 @@ class AllStackClient
             Log::error('Failed to send error to AllStack: ' . $e->getMessage());
             return false;
         }
+    }
+
+
+    private function getCodeContext(string $file, int $line, int $context = 5): array
+    {
+        // If file can't be read (e.g., restricted perms), return empty context
+        if (!is_readable($file)) {
+            return [];
+        }
+
+        // Read all lines from file
+        $lines = @file($file, FILE_IGNORE_NEW_LINES);
+
+        if (!$lines) {
+            return [];
+        }
+
+        // Indices in the array are zero-based; PHP lines are 1-based
+        $start = max($line - $context - 1, 0);
+        $end   = min($line + $context - 1, count($lines) - 1);
+
+        $snippet = [];
+
+        for ($i = $start; $i <= $end; $i++) {
+            // Store line number and content. You can highlight the error line if you want.
+            $snippet[$i + 1] = $lines[$i];
+        }
+
+        return $snippet;
     }
 
     /**
