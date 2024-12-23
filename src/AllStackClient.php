@@ -104,33 +104,64 @@ class AllStackClient
     }
 
 
-    private function getCodeContext(string $file, int $line, int $context = 5): array
-    {
-        // If file can't be read (e.g., restricted perms), return empty context
-        if (!is_readable($file)) {
-            return [];
-        }
-
-        // Read all lines from file
-        $lines = @file($file, FILE_IGNORE_NEW_LINES);
-
-        if (!$lines) {
-            return [];
-        }
-
-        // Indices in the array are zero-based; PHP lines are 1-based
-        $start = max($line - $context - 1, 0);
-        $end   = min($line + $context - 1, count($lines) - 1);
-
-        $snippet = [];
-
-        for ($i = $start; $i <= $end; $i++) {
-            // Store line number and content. You can highlight the error line if you want.
-            $snippet[$i + 1] = $lines[$i];
-        }
-
-        return $snippet;
+    /**
+ * Capture a small code snippet around the given line.
+ * 
+ * @param string $file  Absolute path to file where exception occurred.
+ * @param int    $line  Line number in the file (1-based).
+ * @param int    $context  How many lines to read above & below.
+ * @return array Associative array of lineNumber => codeLine
+ */
+private function getCodeContext(string $file, int $line, int $context = 5): array
+{
+    // 0. Only gather code context if environment != 'production' (example logic).
+    if (app()->environment('production')) {
+        return [];
     }
+
+    // 1. Check if file is readable at all.
+    if (!is_readable($file)) {
+        return [];
+    }
+
+    // 2. Use SplFileObject to read only the necessary lines (rather than entire file).
+    try {
+        $fileObj = new \SplFileObject($file);
+    } catch (\Exception $e) {
+        // If file can't be opened, return no context
+        return [];
+    }
+
+    // 3. Determine the lines to read
+    $start = max($line - $context, 1); // line numbers are 1-based
+    $end   = $line + $context;
+
+    // 4. Create snippet array
+    $snippet = [];
+
+    // 5. Loop only through needed lines
+    for ($currentLine = $start; $currentLine <= $end; $currentLine++) {
+        try {
+            // Move to the (currentLine - 1)th index (0-based in SplFileObject)
+            $fileObj->seek($currentLine - 1);
+            
+            // If we’re beyond the end of file, break early
+            if (!$fileObj->valid()) {
+                break;
+            }
+
+            // Fetch code line
+            $codeLine = rtrim($fileObj->current(), "\n");
+            // Store in snippet array (keyed by line number)
+            $snippet[$currentLine] = $codeLine;
+        } catch (\Exception $e) {
+            // If something goes wrong (e.g. out of range), break out
+            break;
+        }
+    }
+
+    return $snippet;
+}
 
     /**
      * Capture HTTP requests and send them as "request" events.
