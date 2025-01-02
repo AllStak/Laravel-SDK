@@ -10,7 +10,7 @@ use Illuminate\Http\Request;
 
 class AllStackClient
 {
-    private const API_URL = 'http://localhost:8080/api/client';
+    private const API_URL = 'https://allstack-api.techsea.sa/api/client';
     private const MAX_ATTEMPTS = 100; // per minute
 
     private string $apiKey;
