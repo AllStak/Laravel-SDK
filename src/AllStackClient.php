@@ -25,7 +25,8 @@ class AllStackClient
         $this->httpClient = new Client([
             'timeout'         => 5,
             'connect_timeout' => 5,
-            'http_errors'     => true
+            'http_errors'     => true,
+            'verify'          => true
         ]);
         $this->rateLimiter = app(RateLimiter::class);
     }
