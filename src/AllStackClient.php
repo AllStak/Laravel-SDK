@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;
 use Throwable;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class AllStackClient
 {
@@ -15,22 +17,22 @@ class AllStackClient
 
     private string $apiKey;
     private string $environment;
-    private Client $httpClient;
+    private HttpClientInterface $httpClient;
     private RateLimiter $rateLimiter;
 
     public function __construct(string $apiKey, string $environment = 'production')
     {
         $this->apiKey = $apiKey;
         $this->environment = $environment;
-        $this->httpClient = new Client([
-            'timeout'         => 5,
-            'connect_timeout' => 5,
-            'http_errors'     => true,
-            'verify'          => true
+        $this->httpClient = HttpClient::create([
+            'timeout' => 5,
+            'headers' => [
+                'x-api-key' => $this->apiKey,
+                'Accept'    => 'application/json',
+            ],
         ]);
         $this->rateLimiter = app(RateLimiter::class);
     }
-
     /**
      * Capture exceptions and send them as "error" events.
      */
@@ -97,7 +99,10 @@ class AllStackClient
                 return false;
             }
 
-            return $this->sendWithRetry('/exception', $payload);
+            $this->httpClient->request('POST', self::API_URL . '/exception', [
+                'json' => $payload,
+            ]);
+            return true;
         } catch (\Exception $e) {
             Log::error('Failed to send error to AllStack: ' . $e->getMessage());
             return false;
@@ -194,8 +199,11 @@ class AllStackClient
             if (!$this->validatePayload($payload)) {
                 return false;
             }
+            $this->httpClient->request('POST', self::API_URL . '/http-request-transactions', [
+                'json' => $payload,
+            ]);
 
-            return $this->sendWithRetry('/http-request-transactions', $payload);
+            return true;
         } catch (\Exception $e) {
             Log::error('Failed to send request to AllStack: ' . $e->getMessage());
             return false;
