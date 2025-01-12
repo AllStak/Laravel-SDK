@@ -64,10 +64,10 @@ class AllStackClient
                     'hostname' => gethostname(),
                     // NEW: Capture code snippet
                     'codeContext' => $this->getCodeContext(
-                        $exception->getFile(), 
-                        $exception->getLine(), 
+                        $exception->getFile(),
+                        $exception->getLine(),
                         5 // number of lines of context on each side
-                    ), 
+                    ),
                 ],
                 'stackTrace'    => (object) $this->formatStackTrace($exception),
                 'contexts'      => $this->createContexts(),
@@ -353,7 +353,7 @@ class AllStackClient
     private function transformHeaders(array $headers): array
     {
         $transformed = [];
-        
+
         foreach ($headers as $key => $values) {
             if (is_array($values)) {
                 $transformed[strtolower($key)] = implode(', ', $values);
@@ -361,15 +361,130 @@ class AllStackClient
                 $transformed[strtolower($key)] = $values;
             }
         }
-        
+
         Log::debug('Transformed headers', ['headers' => $transformed]);
         return $transformed;
     }
 
+    private array $sensitivePatterns = [
+        // Authentication & Security
+        'password',
+        'passwd',
+        'secret',
+        'token',
+        'api[_\-]?key',
+        'auth',
+        'credentials',
+        'private[_\-]?key',
+        'pubkey',
+        'encryption[_\-]?key',
+        'jwt',
+        'session[_\-]?id',
+        'csrf',
+
+        // Financial Information
+        'credit[_\-]?card',
+        'card[_\-]?number',
+        'ccv',
+        'cvv',
+        'cvc',
+        'pan',
+        'pin',
+        'account[_\-]?number',
+        'iban',
+        'bic',
+        'swift',
+        'bank[_\-]?account',
+        'routing[_\-]?number',
+        'tax[_\-]?id',
+        'vat[_\-]?number',
+
+        // Personal Identification
+        'ssn',
+        'social[_\-]?security',
+        'passport',
+        'id[_\-]?number',
+        'driver[_\-]?licen[sc]e',
+        'national[_\-]?id',
+        'identity[_\-]?card',
+        'birth[_\-]?date',
+        'dob',
+        'age',
+
+        // Contact Information
+        'email',
+        'e[_\-]?mail',
+        'phone',
+        'mobile',
+        'telephone',
+        'fax',
+        'address',
+        'street',
+        'city',
+        'state',
+        'country',
+        'zip',
+        'postal',
+        'postcode',
+
+        // Medical & Health
+        'health[_\-]?record',
+        'medical[_\-]?id',
+        'diagnosis',
+        'prescription',
+        'patient[_\-]?id',
+        'insurance[_\-]?id',
+        'blood[_\-]?type',
+
+        // Biometric Data
+        'finger[_\-]?print',
+        'face[_\-]?id',
+        'retina[_\-]?scan',
+        'voice[_\-]?print',
+        'dna',
+        'biometric',
+
+        // Professional & Employment
+        'salary',
+        'income',
+        'payment',
+        'wage',
+        'compensation',
+        'employee[_\-]?id',
+        'staff[_\-]?id',
+        'department',
+        'position',
+
+        // Online Identifiers
+        'ip[_\-]?address',
+        'mac[_\-]?address',
+        'imei',
+        'device[_\-]?id',
+        'cookie[_\-]?id',
+
+        // Personal Characteristics
+        'gender',
+        'sex',
+        'race',
+        'ethnicity',
+        'nationality',
+        'religion',
+        'political',
+        'sexual[_\-]?orientation',
+        'marital[_\-]?status',
+
+        // Other Sensitive Data
+        'password[_\-]?reset',
+        'security[_\-]?question',
+        'mother[_\-]?maiden',
+        'birth[_\-]?place',
+        'signature'
+    ];
+
     private function transformQueryParams(array $params): array
     {
         $transformed = [];
-        
+
         foreach ($params as $key => $value) {
             if (is_array($value)) {
                 $transformed[$key] = implode(',', $value);
@@ -385,39 +500,145 @@ class AllStackClient
                 }
             }
         }
-        
+
         Log::debug('Transformed query params', ['params' => $transformed]);
         return $transformed;
     }
 
-    private function transformRequestBody(array $data): array
+    /**
+     * Transform request body by redacting sensitive information
+     */
+    public function transformRequestBody(array $data): array
+    {
+        return $this->transformData($data);
+    }
+
+    /**
+     * Recursive function to transform data and redact sensitive information
+     */
+    private function transformData(array $data): array
     {
         $transformed = [];
-        $sensitiveFields = ['password', 'token', 'secret', 'credit_card'];
-        
+
         foreach ($data as $key => $value) {
+            // Handle nested arrays recursively
             if (is_array($value)) {
-                $transformed[$key] = $this->transformRequestBody($value);
-            } else {
-                foreach ($sensitiveFields as $field) {
-                    if (stripos($key, $field) !== false) {
-                        $value = '[REDACTED]';
-                        break;
-                    }
-                }
-                if ($value === 'true') {
+                $transformed[$key] = $this->transformData($value);
+                continue;
+            }
+
+            // Skip null values
+            if ($value === null) {
+                $transformed[$key] = null;
+                continue;
+            }
+
+            // Check if the key matches any sensitive patterns
+            if ($this->isSensitiveField($key)) {
+                $transformed[$key] = '[REDACTED]';
+                continue;
+            }
+
+            // Transform boolean strings to actual booleans
+            if (is_string($value)) {
+                if (strtolower($value) === 'true') {
                     $transformed[$key] = true;
-                } elseif ($value === 'false') {
+                    continue;
+                }
+                if (strtolower($value) === 'false') {
                     $transformed[$key] = false;
-                } elseif (is_numeric($value)) {
-                    $transformed[$key] = $value * 1;
-                } else {
-                    $transformed[$key] = $value;
+                    continue;
                 }
             }
+
+            // Convert numeric strings to numbers
+            if (is_string($value) && is_numeric($value)) {
+                // Preserve original type (int or float)
+                $transformed[$key] = $value * 1;
+                continue;
+            }
+
+            // Check for potential sensitive data in values
+            if (is_string($value) && $this->containsSensitiveData($value)) {
+                $transformed[$key] = '[REDACTED]';
+                continue;
+            }
+
+            $transformed[$key] = $value;
         }
-        
+
         return $transformed;
+    }
+
+    /**
+     * Check if a field name matches any sensitive patterns
+     */
+    private function isSensitiveField(string $fieldName): bool
+    {
+        $fieldName = strtolower($fieldName);
+        foreach ($this->sensitivePatterns as $pattern) {
+            if (preg_match("/.*{$pattern}.*/i", $fieldName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Check if a string value potentially contains sensitive data
+     */
+    private function containsSensitiveData(string $value): bool
+    {
+        // Check for common sensitive data patterns
+        $patterns = [
+            // Credit card patterns
+            '/\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/', // Basic 16-digit
+            '/\b\d{4}\s\d{6}\s\d{5}\b/', // American Express
+
+            // Financial identifiers
+            '/\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b/', // IBAN
+            '/\b[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?\b/', // BIC/SWIFT
+
+            // Authentication tokens
+            '/\b([a-zA-Z0-9]{32,})\b/', // API keys
+            '/eyJ[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+/', // JWT
+            '/Bearer\s+[a-zA-Z0-9-._~+/]+=*/', // Bearer token
+            '/Basic\s+[a-zA-Z0-9+/=]+/', // Basic auth
+
+            // Personal identification
+            '/\b\d{3}-\d{2}-\d{4}\b/', // SSN
+            '/\b[A-Z]{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}\b/', // Passport (general)
+
+            // Contact information
+            '/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i', // Email
+            '/\b(\+\d{1,3}[-.]?)?\d{3}[-.]?\d{3}[-.]?\d{4}\b/', // Phone numbers
+            '/\b\d{5}(-\d{4})?\b/', // ZIP codes
+
+            // Medical identifiers
+            '/\b\d{3}-\d{3}-\d{4}\b/', // Medical record numbers
+            '/\b[A-Z]\d{7}\b/', // NHS number (UK)
+
+            // Device identifiers
+            '/\b([0-9A-F]{2}[:-]){5}([0-9A-F]{2})\b/i', // MAC address
+            '/\b\d{15,17}\b/', // IMEI
+            '/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/', // IPv4
+            '/\b([0-9a-fA-F]{0,4}:){7}[0-9a-fA-F]{0,4}\b/', // IPv6
+
+            // Date patterns
+            '/\b\d{4}[-/]\d{2}[-/]\d{2}\b/', // YYYY-MM-DD
+            '/\b\d{2}[-/]\d{2}[-/]\d{4}\b/', // DD-MM-YYYY
+
+            // Coordinates
+            '/\b[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?),\s*[-+]?(180(\.0+)?|((1[0-7]\d)|([1-9]?\d))(\.\d+)?)\b/' // Lat,Long
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $value)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function validatePayload(array $payload): bool
