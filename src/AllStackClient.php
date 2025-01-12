@@ -11,7 +11,7 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class AllStackClient
 {
-    private const API_URL = 'https://allstack-api.techsea.sa/api/client';
+    private const API_URL = 'http://localhost:8080/api/client';
     private const MAX_ATTEMPTS = 100; // per minute
 
     private string $apiKey;
@@ -19,24 +19,54 @@ class AllStackClient
     private HttpClientInterface $httpClient;
     private RateLimiter $rateLimiter;
 
+    /**
+     * Toggle data anonymization (IP, UA, etc.). Default to true for GDPR.
+     */
+    private bool $anonymizeData = true;
+
+    /**
+     * --------------------------------------
+     * NEW: Pattern-based detection for secrets
+     * --------------------------------------
+     * You can expand or refine this list of regex patterns
+     * to capture typical API keys, tokens, etc.
+     *
+     * Example patterns:
+     * - `[A-Za-z0-9_=-]{20,}`: a naive pattern for 20+ base64-ish strings
+     * - `AKIA[0-9A-Z]{16}`: an AWS Access Key example
+     * - `[0-9a-fA-F]{32,}`: a naive hex token of length >= 32
+     */
+    private array $secretPatterns = [
+        '/AKIA[0-9A-Z]{16}/',        // Example: AWS Access Key (very naive)
+        '/[A-Za-z0-9_\-=]{20,}/',    // Generic "long token" with base64 chars or underscores
+        '/[0-9a-fA-F]{32,}/',        // Hex strings of length >= 32
+    ];
+
     public function __construct(string $apiKey, string $environment = 'production')
     {
-        $this->apiKey = $apiKey;
-        $this->environment = $environment;
-        $this->httpClient = HttpClient::create([
+        $this->apiKey       = $apiKey;
+        $this->environment  = $environment;
+        $this->httpClient   = HttpClient::create([
             'timeout' => 5,
             'headers' => [
                 'x-api-key' => $this->apiKey,
                 'Accept'    => 'application/json',
             ],
         ]);
-        $this->rateLimiter = app(RateLimiter::class);
+        $this->rateLimiter  = app(RateLimiter::class);
     }
+
     /**
-     * Capture exceptions and send them as "error" events.
+     * Example: Capture an Exception
      */
     public function captureException(Throwable $exception): bool
     {
+        // OPTIONAL: Check if user consented to data processing (GDPR)
+        if (!$this->userHasConsented()) {
+            Log::info('Skipping error capture due to no user consent');
+            return false;
+        }
+
         if ($this->shouldThrottle()) {
             Log::warning('AllStack rate limit exceeded');
             return false;
@@ -47,37 +77,35 @@ class AllStackClient
             $errorSeverity = $this->determineErrorSeverity($exception);
             $errorLevel    = $this->determineErrorLevel('error', $errorSeverity);
 
-            // 2. Build final payload
+            // 2. Build the payload
             $payload = [
                 'errorMessage'   => $exception->getMessage() ?: 'Unknown Exception',
                 'errorType'      => get_class($exception),
                 'errorLevel'     => $errorLevel,
                 'environment'    => $this->environment,
-                'ip'             => $this->getIpAddress(),
+                'ip'             => $this->anonymizeData
+                    ? $this->anonymizeIp($this->getIpAddress())
+                    : $this->getIpAddress(),
                 'userAgent'      => 'Laravel',
                 'url'            => '',
                 'timestamp'      => $this->formatTimestamp(now()),
                 'additionalData' => [
-                    'file'     => $exception->getFile(),
-                    'line'     => $exception->getLine(),
-                    'trace'    => $exception->getTraceAsString(),
-                    'hostname' => gethostname(),
-                    // NEW: Capture code snippet
+                    'file'        => $exception->getFile(),
+                    'line'        => $exception->getLine(),
+                    'trace'       => $exception->getTraceAsString(),
+                    'hostname'    => gethostname(),
                     'codeContext' => $this->getCodeContext(
                         $exception->getFile(),
                         $exception->getLine(),
-                        5 // number of lines of context on each side
+                        5
                     ),
                 ],
                 'stackTrace'    => (object) $this->formatStackTrace($exception),
                 'contexts'      => $this->createContexts(),
-
-                // new field
                 'errorCategory' => $this->determineErrorCategory($exception),
-                // new field for cause
                 'errorCause'    => $this->determineErrorCause($exception),
 
-                // Example optional fields (match your Java DTO)
+                // Some optional fields
                 'release'       => env('RELEASE', '1.0.0'),
                 'component'     => env('COMPONENT', 'my-component'),
                 'transactionId' => '',
@@ -101,6 +129,7 @@ class AllStackClient
             $this->httpClient->request('POST', self::API_URL . '/exception', [
                 'json' => $payload,
             ]);
+
             return true;
         } catch (\Exception $e) {
             Log::error('Failed to send error to AllStack: ' . $e->getMessage());
@@ -108,59 +137,44 @@ class AllStackClient
         }
     }
 
-
-    private function getCodeContext(string $file, int $line, int $context = 5): array
-    {
-        // If file can't be read (e.g., restricted perms), return empty context
-        if (!is_readable($file)) {
-            return [];
-        }
-
-        // Read all lines from file
-        $lines = @file($file, FILE_IGNORE_NEW_LINES);
-
-        if (!$lines) {
-            return [];
-        }
-
-        // Indices in the array are zero-based; PHP lines are 1-based
-        $start = max($line - $context - 1, 0);
-        $end   = min($line + $context - 1, count($lines) - 1);
-
-        $snippet = [];
-
-        for ($i = $start; $i <= $end; $i++) {
-            // Store line number and content. You can highlight the error line if you want.
-            $snippet[$i + 1] = $lines[$i];
-        }
-
-        return $snippet;
-    }
-
     /**
-     * Capture HTTP requests and send them as "request" events.
+     * Capture an HTTP request
      */
     public function captureRequest(Request $request, float $responseTime = 0): bool
     {
+        // OPTIONAL: Check if user consented to data processing (GDPR)
+        if (!$this->userHasConsented()) {
+            Log::info('Skipping request capture due to no user consent');
+            return false;
+        }
+
         if ($this->shouldThrottle()) {
             Log::warning('AllStack rate limit exceeded');
             return false;
         }
 
         try {
-            // For requests, let's treat them as "low severity" "warning" events.
+            // Let's treat requests as low severity warnings
             $errorSeverity = 'low';
             $errorLevel    = 'WARNING';
 
+            $ipAddress     = $this->anonymizeData
+                ? $this->anonymizeIp($request->ip())
+                : $request->ip();
+
+            // Build the payload
             $payload = [
                 'errorMessage'   => 'HTTP Request Captured',
                 'errorType'      => 'HTTPRequest',
                 'errorLevel'     => $errorLevel,
                 'environment'    => $this->environment,
-                'ip'             => $request->ip(),
-                'userAgent'      => $request->userAgent() ?? 'unknown',
+                'ip'             => $ipAddress,
+                'userAgent'      => $this->anonymizeData
+                    ? $this->filterUserAgent($request->userAgent())
+                    : ($request->userAgent() ?? 'unknown'),
                 'url'            => $request->fullUrl(),
                 'timestamp'      => $this->formatTimestamp(now()),
+
                 'additionalData' => [
                     'headers'     => $this->transformHeaders($request->headers->all()),
                     'queryParams' => $this->transformQueryParams($request->query()),
@@ -173,13 +187,10 @@ class AllStackClient
                 ],
                 'stackTrace'    => new \stdClass(),
                 'contexts'      => $this->createContexts(),
-
-                // We default requests to 'APPLICATION_ERROR' or similar
                 'errorCategory' => 'APPLICATION_ERROR',
-                // For requests, we might default 'USER' or do logic if certain status codes = user error
                 'errorCause'    => 'USER',
 
-                // Optional fields
+                // Optional
                 'release'       => env('RELEASE', '1.0.0'),
                 'component'     => env('COMPONENT', 'my-component'),
                 'transactionId' => '',
@@ -198,6 +209,7 @@ class AllStackClient
             if (!$this->validatePayload($payload)) {
                 return false;
             }
+
             $this->httpClient->request('POST', self::API_URL . '/http-request-transactions', [
                 'json' => $payload,
             ]);
@@ -210,63 +222,271 @@ class AllStackClient
     }
 
     /**
-     * -------------------------------
-     * Helper methods & transformations
-     * -------------------------------
+     * ==========================================
+     * TRANSFORMATION METHODS (HEADERS/BODY/QUERY)
+     * WITH PATTERN-BASED REDACTION
+     * ==========================================
      */
 
     /**
-     * New method to decide if the error is caused by the user or by the system.
+     * We define a single method that applies
+     * multiple checks (field-based + pattern-based).
      */
-    private function determineErrorCause(Throwable $exception): string
+    private function sanitizeValue(string $key, mixed $value): mixed
     {
-        // Example heuristics, tailor to your logic
-        $msg = strtolower($exception->getMessage());
-        // If the message mentions invalid input, we consider it user-caused.
-        if (str_contains($msg, 'validation') || str_contains($msg, 'input')) {
-            return 'USER';
-        }
-        // If it mentions DB connection, server crash, etc., we consider it system-caused.
-        if (str_contains($msg, 'db') || str_contains($msg, 'server') || str_contains($msg, 'connection')) {
-            return 'SYSTEM';
+        // 1) If it's not a string, we won't do pattern matching
+        //    but we still might want to check for arrays below.
+        if (!is_string($value)) {
+            return $value;
         }
 
-        // Fallback
-        return 'SYSTEM';
+        // 2) If the key is obviously sensitive (like 'password', 'token', etc.), redact immediately.
+        if ($this->isFieldSensitive($key)) {
+            return '[REDACTED]';
+        }
+
+        // 3) Check for typical PII (email, phone) or known sensitive pattern
+        if ($this->isPotentiallySensitive($value)) {
+            return '[REDACTED]';
+        }
+
+        // 4) Otherwise, return value as is
+        return $value;
     }
 
     /**
-     * We add a method to figure out which of the Java enum categories might match this PHP Throwable.
-     * APPLICATION_ERROR, NETWORK_ERROR, DATABASE_ERROR,
-     * SECURITY_ERROR, PERFORMANCE_ERROR, UNKNOWN_ERROR
+     * Transform headers: remove or mask known sensitive headers
+     * plus run pattern checks.
      */
-    private function determineErrorCategory(Throwable $exception): string
+    private function transformHeaders(array $headers): array
     {
-        $message = strtolower($exception->getMessage());
+        $transformed = [];
+        $sensitiveHeaders = [
+            'authorization',
+            'cookie',
+            'set-cookie'
+            // add more if needed
+        ];
 
-        // Very naive heuristics, adjust as needed:
-        if (str_contains($message, 'sql') || str_contains($message, 'db') || str_contains($message, 'database')) {
-            return 'DATABASE_ERROR';
-        }
-        if (str_contains($message, 'network') || str_contains($message, 'timeout') || str_contains($message, 'socket')) {
-            return 'NETWORK_ERROR';
-        }
-        if (str_contains($message, 'security') || str_contains($message, 'unauthorized') || str_contains($message, 'forbidden')) {
-            return 'SECURITY_ERROR';
-        }
-        if (str_contains($message, 'performance') || str_contains($message, 'slow')) {
-            return 'PERFORMANCE_ERROR';
-        }
-        if (str_contains($message, 'app') || str_contains($message, 'logic') || str_contains($message, 'handler')) {
-            return 'APPLICATION_ERROR';
+        foreach ($headers as $key => $values) {
+            $lowerKey = strtolower($key);
+
+            // If header name is sensitive, redact entirely
+            if (in_array($lowerKey, $sensitiveHeaders, true)) {
+                $transformed[$lowerKey] = '[REDACTED]';
+                continue;
+            }
+
+            // Otherwise, check each value for patterns
+            if (is_array($values)) {
+                $masked = [];
+                foreach ($values as $val) {
+                    $masked[] = is_string($val)
+                        ? $this->applySecretPatterns($val)
+                        : $val;
+                }
+                $transformed[$lowerKey] = implode(', ', $masked);
+            } else {
+                $transformed[$lowerKey] = $this->applySecretPatterns($values);
+            }
         }
 
-        return 'UNKNOWN_ERROR';
+        Log::debug('Transformed headers with pattern-based redaction', ['headers' => $transformed]);
+        return $transformed;
     }
 
     /**
-     * Very simplified approach to "severity" mapping (like in Node SDK).
+     * Transform query params: recursively sanitize each value
      */
+    private function transformQueryParams(array $params): array
+    {
+        $transformed = [];
+        foreach ($params as $key => $value) {
+            if (is_array($value)) {
+                $transformed[$key] = $this->transformQueryParams($value);
+                continue;
+            }
+
+            // Convert booleans and numbers
+            if ($value === 'true') {
+                $value = true;
+            } elseif ($value === 'false') {
+                $value = false;
+            } elseif (is_numeric($value)) {
+                $value = $value * 1;
+            }
+
+            // Apply combined field+pattern checks
+            $transformed[$key] = $this->sanitizeValue($key, $value);
+        }
+
+        Log::debug('Transformed query params with pattern-based redaction', ['params' => $transformed]);
+        return $transformed;
+    }
+
+    /**
+     * Transform request body: recursively sanitize each field
+     */
+    private function transformRequestBody(array $data): array
+    {
+        $transformed = [];
+        foreach ($data as $key => $value) {
+            if (is_array($value)) {
+                $transformed[$key] = $this->transformRequestBody($value);
+                continue;
+            }
+
+            if ($value === 'true') {
+                $value = true;
+            } elseif ($value === 'false') {
+                $value = false;
+            } elseif (is_numeric($value)) {
+                $value = $value * 1;
+            }
+
+            $transformed[$key] = $this->sanitizeValue($key, (string)$value);
+        }
+
+        return $transformed;
+    }
+
+    /**
+     * ==========================================
+     * PATTERN-BASED SENSITIVE DETECTION
+     * ==========================================
+     */
+
+    /**
+     * Actually apply the patterns in $this->secretPatterns
+     * to the given string, returning "[REDACTED]" if a match is found.
+     */
+    private function applySecretPatterns(string $value): string
+    {
+        foreach ($this->secretPatterns as $pattern) {
+            if (preg_match($pattern, $value)) {
+                return '[REDACTED]';
+            }
+        }
+        return $value;
+    }
+
+    /**
+     * We can define "isPotentiallySensitive" more broadly:
+     * - Checks for email or phone
+     * - Checks the secret patterns
+     */
+    private function isPotentiallySensitive(string $value): bool
+    {
+        // Check for email
+        if (filter_var($value, FILTER_VALIDATE_EMAIL)) {
+            return true;
+        }
+
+        // Check for phone number (naive)
+        if (preg_match('/^\+?\d{7,15}$/', $value)) {
+            return true;
+        }
+
+        // Check for known secret patterns (API keys, tokens)
+        foreach ($this->secretPatterns as $pattern) {
+            if (preg_match($pattern, $value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if the field name is known to be sensitive
+     * e.g. password, token, secret, credit_card, etc.
+     */
+    private function isFieldSensitive(string $fieldName): bool
+    {
+        $sensitiveFields = [
+            'password', 'pwd', 'token', 'secret', 'credit_card',
+            'card_number', 'api_key', 'apikey', 'secret_key',
+            'authorization' // if it shows up in body
+        ];
+
+        foreach ($sensitiveFields as $field) {
+            if (stripos($fieldName, $field) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * ==========================================
+     * Other existing helper methods
+     * ==========================================
+     */
+
+    private function anonymizeIp(string $ip): string
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $parts = explode('.', $ip);
+            $parts[count($parts) - 1] = 'x';
+            return implode('.', $parts);
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $parts = explode(':', $ip);
+            $parts = array_slice($parts, 0, 4);
+            return implode(':', $parts).'::xxxx';
+        }
+
+        return $ip;
+    }
+
+    private function filterUserAgent(?string $userAgent): string
+    {
+        if (!$userAgent) {
+            return 'unknown';
+        }
+        return preg_replace('/\d+/', 'XXX', $userAgent);
+    }
+
+    private function userHasConsented(): bool
+    {
+        // For demonstration, we return true by default.
+        // Real-world: Check user preference or a config setting.
+        return true;
+    }
+
+    private function shouldThrottle(): bool
+    {
+        return !$this->rateLimiter->attempt(
+            'allstack-api',
+            self::MAX_ATTEMPTS,
+            function () {
+                return true;
+            }
+        );
+    }
+
+    private function getCodeContext(string $file, int $line, int $context = 5): array
+    {
+        if (!is_readable($file)) {
+            return [];
+        }
+
+        $lines = @file($file, FILE_IGNORE_NEW_LINES);
+        if (!$lines) {
+            return [];
+        }
+
+        $start = max($line - $context - 1, 0);
+        $end   = min($line + $context - 1, count($lines) - 1);
+
+        $snippet = [];
+        for ($i = $start; $i <= $end; $i++) {
+            $snippet[$i + 1] = $lines[$i];
+        }
+        return $snippet;
+    }
+
     private function determineErrorSeverity(Throwable $exception): string
     {
         if ($exception instanceof \TypeError || $exception instanceof \ErrorException) {
@@ -282,9 +502,6 @@ class AllStackClient
         return 'low';
     }
 
-    /**
-     * Determine the "errorLevel" (INFO, WARNING, ERROR, CRITICAL).
-     */
     private function determineErrorLevel(string $type, string $severity): string
     {
         if ($type === 'error') {
@@ -293,9 +510,6 @@ class AllStackClient
         return $severity === 'critical' ? 'CRITICAL' : 'WARNING';
     }
 
-    /**
-     * Format a stack trace as an array of frames (similar to Node approach).
-     */
     private function formatStackTrace(Throwable $exception): array
     {
         $stackTrace = [];
@@ -311,13 +525,9 @@ class AllStackClient
                 'type'     => $frame['type']     ?? '',
             ];
         }
-
         return $stackTrace;
     }
 
-    /**
-     * Minimal "contexts" to mimic Node’s "runtime/system/process" concept.
-     */
     private function createContexts(): array
     {
         return [
@@ -350,295 +560,38 @@ class AllStackClient
         return gethostbyname(gethostname());
     }
 
-    private function transformHeaders(array $headers): array
+    private function determineErrorCause(Throwable $exception): string
     {
-        $transformed = [];
-
-        foreach ($headers as $key => $values) {
-            if (is_array($values)) {
-                $transformed[strtolower($key)] = implode(', ', $values);
-            } else {
-                $transformed[strtolower($key)] = $values;
-            }
+        $msg = strtolower($exception->getMessage());
+        if (str_contains($msg, 'validation') || str_contains($msg, 'input')) {
+            return 'USER';
         }
-
-        Log::debug('Transformed headers', ['headers' => $transformed]);
-        return $transformed;
+        if (str_contains($msg, 'db') || str_contains($msg, 'server') || str_contains($msg, 'connection')) {
+            return 'SYSTEM';
+        }
+        return 'SYSTEM';
     }
 
-    private array $sensitivePatterns = [
-        // Authentication & Security
-        'password',
-        'passwd',
-        'secret',
-        'token',
-        'api[_\-]?key',
-        'auth',
-        'credentials',
-        'private[_\-]?key',
-        'pubkey',
-        'encryption[_\-]?key',
-        'jwt',
-        'session[_\-]?id',
-        'csrf',
-
-        // Financial Information
-        'credit[_\-]?card',
-        'card[_\-]?number',
-        'ccv',
-        'cvv',
-        'cvc',
-        'pan',
-        'pin',
-        'account[_\-]?number',
-        'iban',
-        'bic',
-        'swift',
-        'bank[_\-]?account',
-        'routing[_\-]?number',
-        'tax[_\-]?id',
-        'vat[_\-]?number',
-
-        // Personal Identification
-        'ssn',
-        'social[_\-]?security',
-        'passport',
-        'id[_\-]?number',
-        'driver[_\-]?licen[sc]e',
-        'national[_\-]?id',
-        'identity[_\-]?card',
-        'birth[_\-]?date',
-        'dob',
-        'age',
-
-        // Contact Information
-        'email',
-        'e[_\-]?mail',
-        'phone',
-        'mobile',
-        'telephone',
-        'fax',
-        'address',
-        'street',
-        'city',
-        'state',
-        'country',
-        'zip',
-        'postal',
-        'postcode',
-
-        // Medical & Health
-        'health[_\-]?record',
-        'medical[_\-]?id',
-        'diagnosis',
-        'prescription',
-        'patient[_\-]?id',
-        'insurance[_\-]?id',
-        'blood[_\-]?type',
-
-        // Biometric Data
-        'finger[_\-]?print',
-        'face[_\-]?id',
-        'retina[_\-]?scan',
-        'voice[_\-]?print',
-        'dna',
-        'biometric',
-
-        // Professional & Employment
-        'salary',
-        'income',
-        'payment',
-        'wage',
-        'compensation',
-        'employee[_\-]?id',
-        'staff[_\-]?id',
-        'department',
-        'position',
-
-        // Online Identifiers
-        'ip[_\-]?address',
-        'mac[_\-]?address',
-        'imei',
-        'device[_\-]?id',
-        'cookie[_\-]?id',
-
-        // Personal Characteristics
-        'gender',
-        'sex',
-        'race',
-        'ethnicity',
-        'nationality',
-        'religion',
-        'political',
-        'sexual[_\-]?orientation',
-        'marital[_\-]?status',
-
-        // Other Sensitive Data
-        'password[_\-]?reset',
-        'security[_\-]?question',
-        'mother[_\-]?maiden',
-        'birth[_\-]?place',
-        'signature'
-    ];
-
-    private function transformQueryParams(array $params): array
+    private function determineErrorCategory(Throwable $exception): string
     {
-        $transformed = [];
+        $message = strtolower($exception->getMessage());
 
-        foreach ($params as $key => $value) {
-            if (is_array($value)) {
-                $transformed[$key] = implode(',', $value);
-            } else {
-                if ($value === 'true') {
-                    $transformed[$key] = true;
-                } elseif ($value === 'false') {
-                    $transformed[$key] = false;
-                } elseif (is_numeric($value)) {
-                    $transformed[$key] = $value * 1;
-                } else {
-                    $transformed[$key] = $value;
-                }
-            }
+        if (str_contains($message, 'sql') || str_contains($message, 'db') || str_contains($message, 'database')) {
+            return 'DATABASE_ERROR';
         }
-
-        Log::debug('Transformed query params', ['params' => $transformed]);
-        return $transformed;
-    }
-
-    /**
-     * Transform request body by redacting sensitive information
-     */
-    public function transformRequestBody(array $data): array
-    {
-        return $this->transformData($data);
-    }
-
-    /**
-     * Recursive function to transform data and redact sensitive information
-     */
-    private function transformData(array $data): array
-    {
-        $transformed = [];
-
-        foreach ($data as $key => $value) {
-            // Handle nested arrays recursively
-            if (is_array($value)) {
-                $transformed[$key] = $this->transformData($value);
-                continue;
-            }
-
-            // Skip null values
-            if ($value === null) {
-                $transformed[$key] = null;
-                continue;
-            }
-
-            // Check if the key matches any sensitive patterns
-            if ($this->isSensitiveField($key)) {
-                $transformed[$key] = '[REDACTED]';
-                continue;
-            }
-
-            // Transform boolean strings to actual booleans
-            if (is_string($value)) {
-                if (strtolower($value) === 'true') {
-                    $transformed[$key] = true;
-                    continue;
-                }
-                if (strtolower($value) === 'false') {
-                    $transformed[$key] = false;
-                    continue;
-                }
-            }
-
-            // Convert numeric strings to numbers
-            if (is_string($value) && is_numeric($value)) {
-                // Preserve original type (int or float)
-                $transformed[$key] = $value * 1;
-                continue;
-            }
-
-            // Check for potential sensitive data in values
-            if (is_string($value) && $this->containsSensitiveData($value)) {
-                $transformed[$key] = '[REDACTED]';
-                continue;
-            }
-
-            $transformed[$key] = $value;
+        if (str_contains($message, 'network') || str_contains($message, 'timeout') || str_contains($message, 'socket')) {
+            return 'NETWORK_ERROR';
         }
-
-        return $transformed;
-    }
-
-    /**
-     * Check if a field name matches any sensitive patterns
-     */
-    private function isSensitiveField(string $fieldName): bool
-    {
-        $fieldName = strtolower($fieldName);
-        foreach ($this->sensitivePatterns as $pattern) {
-            if (preg_match("/.*{$pattern}.*/i", $fieldName)) {
-                return true;
-            }
+        if (str_contains($message, 'security') || str_contains($message, 'unauthorized') || str_contains($message, 'forbidden')) {
+            return 'SECURITY_ERROR';
         }
-        return false;
-    }
-
-    /**
-     * Check if a string value potentially contains sensitive data
-     */
-    private function containsSensitiveData(string $value): bool
-    {
-        // Check for common sensitive data patterns
-        $patterns = [
-            // Credit card patterns
-            '/\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/', // Basic 16-digit
-            '/\b\d{4}\s\d{6}\s\d{5}\b/', // American Express
-
-            // Financial identifiers
-            '/\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b/', // IBAN
-            '/\b[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?\b/', // BIC/SWIFT
-
-            // Authentication tokens
-            '/\b([a-zA-Z0-9]{32,})\b/', // API keys
-            '/eyJ[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+/', // JWT
-            '/Bearer\s+[a-zA-Z0-9-._~+/]+=*/', // Bearer token
-            '/Basic\s+[a-zA-Z0-9+/=]+/', // Basic auth
-
-            // Personal identification
-            '/\b\d{3}-\d{2}-\d{4}\b/', // SSN
-            '/\b[A-Z]{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}\b/', // Passport (general)
-
-            // Contact information
-            '/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i', // Email
-            '/\b(\+\d{1,3}[-.]?)?\d{3}[-.]?\d{3}[-.]?\d{4}\b/', // Phone numbers
-            '/\b\d{5}(-\d{4})?\b/', // ZIP codes
-
-            // Medical identifiers
-            '/\b\d{3}-\d{3}-\d{4}\b/', // Medical record numbers
-            '/\b[A-Z]\d{7}\b/', // NHS number (UK)
-
-            // Device identifiers
-            '/\b([0-9A-F]{2}[:-]){5}([0-9A-F]{2})\b/i', // MAC address
-            '/\b\d{15,17}\b/', // IMEI
-            '/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/', // IPv4
-            '/\b([0-9a-fA-F]{0,4}:){7}[0-9a-fA-F]{0,4}\b/', // IPv6
-
-            // Date patterns
-            '/\b\d{4}[-/]\d{2}[-/]\d{2}\b/', // YYYY-MM-DD
-            '/\b\d{2}[-/]\d{2}[-/]\d{4}\b/', // DD-MM-YYYY
-
-            // Coordinates
-            '/\b[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?),\s*[-+]?(180(\.0+)?|((1[0-7]\d)|([1-9]?\d))(\.\d+)?)\b/' // Lat,Long
-        ];
-
-        foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $value)) {
-                return true;
-            }
+        if (str_contains($message, 'performance') || str_contains($message, 'slow')) {
+            return 'PERFORMANCE_ERROR';
         }
-
-        return false;
+        if (str_contains($message, 'app') || str_contains($message, 'logic') || str_contains($message, 'handler')) {
+            return 'APPLICATION_ERROR';
+        }
+        return 'UNKNOWN_ERROR';
     }
 
     private function validatePayload(array $payload): bool
@@ -653,7 +606,7 @@ class AllStackClient
         }
 
         foreach ($requiredFields as $field) {
-            if ($payload[$field] === null || $payload[$field] === '') {
+            if (!isset($payload[$field]) || $payload[$field] === '') {
                 Log::warning("Missing required field: {$field}", ['payload' => $payload]);
                 return false;
             }
@@ -662,17 +615,9 @@ class AllStackClient
         return true;
     }
 
-    private function shouldThrottle(): bool
-    {
-        return !$this->rateLimiter->attempt(
-            'allstack-api',
-            self::MAX_ATTEMPTS,
-            function () {
-                return true;
-            }
-        );
-    }
-
+    /**
+     * Example of a "send with retry" pattern if you prefer that approach.
+     */
     private function sendWithRetry(string $endpoint, array $payload, int $maxRetries = 3): bool
     {
         $attempt = 0;
@@ -685,7 +630,7 @@ class AllStackClient
 
         while ($attempt < $maxRetries) {
             try {
-                $response = $this->httpClient->post(self::API_URL . $endpoint, [
+                $response = $this->httpClient->request('POST', self::API_URL . $endpoint, [
                     'headers' => $this->getHeaders(),
                     'json'    => $payload,
                 ]);
