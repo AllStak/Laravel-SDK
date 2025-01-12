@@ -2,7 +2,6 @@
 
 namespace Techsea\AllStack;
 
-use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;
 use Throwable;
