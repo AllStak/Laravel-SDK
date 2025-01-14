@@ -11,7 +11,7 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class AllStackClient
 {
-    private const API_URL = 'http://localhost:8080/api/client';
+    private const API_URL = 'https://allstack-api.techsea.sa/api/client';
     private const MAX_ATTEMPTS = 100; // per minute
 
     private string $apiKey;
@@ -55,7 +55,7 @@ class AllStackClient
                 'environment'    => $this->environment,
                 'ip'             => $this->getIpAddress(),
                 'userAgent'      => 'Laravel',
-                'url'            => '',
+                'url'            => $this->getFullURL(request()),
                 'timestamp'      => $this->formatTimestamp(now()),
                 'additionalData' => [
                     'file'     => $exception->getFile(),
@@ -202,6 +202,113 @@ class AllStackClient
     }
 
 
+
+    private function getFullURL(Request $request): string
+    {
+        $fullUrl = $request->fullUrl();
+
+        // Define patterns for sensitive data
+        $sensitivePatterns = [
+            // Common sensitive keys
+            '/\b(password|token|api_key|access_token|secret_key|iban|username|email|session_id|auth_token|jwt|credit_card|ssn|private_key|key|oauth_token|csrf_token|refresh_token|pin)\b/i',
+
+            // Generic API Key (e.g., 32-45 alphanumeric characters)
+            '/[a-zA-Z0-9]{32,45}/',
+
+            // AWS Access Key ID
+            '/AKIA[0-9A-Z]{16}/',
+
+            // AWS Secret Access Key
+            '/[A-Za-z0-9\/+=]{40}/',
+
+            // IBAN
+            '/\b[A-Z]{2}[0-9]{2}[A-Z0-9]{1,30}\b/',
+
+            // Email Address
+            '/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/',
+
+            // Bearer Tokens (e.g., JWT)
+            '/^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$/',
+
+            // Credit Card Numbers (e.g., 13 to 19 digits)
+            '/\b\d{13,19}\b/',
+
+            // Social Security Number (SSN) (e.g., XXX-XX-XXXX)
+            '/\b\d{3}-\d{2}-\d{4}\b/',
+
+            // Username (e.g., alphanumeric, 6-16 characters)
+            '/^[a-zA-Z0-9]{6,16}$/',
+
+            // Password (at least 1 digit, 1 uppercase, 1 lowercase, 1 special character)
+            '/^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*\W).{8,32}$/',
+
+            // PIN Codes (4 to 6 digits)
+            '/\b\d{4,6}\b/',
+
+        ];
+
+        // Parse URL to isolate query parameters
+        $parsedUrl = parse_url($fullUrl);
+
+        if (isset($parsedUrl['query'])) {
+            parse_str($parsedUrl['query'], $queryParams);
+
+            // Mask sensitive data in query parameters
+            foreach ($queryParams as $key => $value) {
+                foreach ($sensitivePatterns as $pattern) {
+                    if (preg_match($pattern, $key) || preg_match($pattern, $value)) {
+                        $queryParams[$key] = '[xxxxxx]';
+                        break;
+                    }
+                }
+            }
+
+            // Reconstruct sanitized query string
+            $sanitizedQuery = http_build_query($queryParams);
+
+            // Rebuild URL with sanitized query string
+            $sanitizedUrl = $parsedUrl['scheme'] . '://' .
+                $parsedUrl['host'] .
+                (isset($parsedUrl['path']) ? $parsedUrl['path'] : '') .
+                '?' . $sanitizedQuery;
+
+            return $sanitizedUrl;
+        }
+
+        return $fullUrl;
+    }
+
+
+
+
+
+
+    private function getIpAddress(): string
+    {
+        $ipAddress = request()->ip();
+
+        if (filter_var($ipAddress, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            // Mask the last octet for IPv4 (e.g., 192.168.1.xxx)
+            $parts = explode('.', $ipAddress);
+            $parts[3] = '0'; // Replace the last octet
+            return implode('.', $parts);
+        } elseif (filter_var($ipAddress, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            // Mask the last 64 bits for IPv6 (e.g., 2001:db8::xxxx)
+            $parts = explode(':', $ipAddress);
+            $parts = array_slice($parts, 0, 4); // Keep the first 4 groups
+            return implode(':', $parts) . '::';
+        }
+
+        return '0.0.0.0'; // Fallback for invalid IPs
+    }
+
+
+
+
+
+
+
+
     /**
      * Capture HTTP requests and send them as "request" events.
      */
@@ -224,7 +331,7 @@ class AllStackClient
                 'environment'    => $this->environment,
                 'ip'             => $request->ip(),
                 'userAgent'      => $request->userAgent() ?? 'unknown',
-                'url'            => $request->fullUrl(),
+                'url'            => $this->getFullURL($request),
                 'timestamp'      => $this->formatTimestamp(now()),
                 'additionalData' => [
                     'headers'     => $this->transformHeaders($request->headers->all()),
@@ -410,10 +517,7 @@ class AllStackClient
         return $dt->format('Y-m-d\TH:i:s');
     }
 
-    private function getIpAddress(): string
-    {
-        return gethostbyname(gethostname());
-    }
+
 
     private function transformHeaders(array $headers): array
     {
