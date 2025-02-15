@@ -13,7 +13,7 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class AllStackClient
 {
-    private const API_URL = 'https://allstack-api.techsea.sa/api/client';
+    private const API_URL = 'https://api.allstak.io/api/client';
     private const MAX_ATTEMPTS = 100;
 
     private string $apiKey;
