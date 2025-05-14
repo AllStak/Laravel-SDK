@@ -57,6 +57,11 @@ class AllStackClient
             );
             $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);
 
+            // Get any breadcrumbs stored during the request lifecycle
+            $breadcrumbs = app()->bound('allstack.breadcrumbs')
+                ? app('allstack.breadcrumbs')->toArray()
+                : [];
+
             $payload = [
                 'errorMessage'   => $exception->getMessage() ?: 'Unknown Exception',
                 'errorType'      => get_class($exception),
@@ -81,6 +86,7 @@ class AllStackClient
                 'component'      => env('COMPONENT', 'my-component'),
                 'memoryUsage'    => $this->clientHelper->getMemoryUsage(),
                 'errorSeverity'  => $errorSeverity,
+                'breadcrumbs'    => $breadcrumbs, // ✅ NEW
             ];
 
             Log::debug('AllStack Exception Payload', ['payload' => $payload]);
@@ -105,12 +111,17 @@ class AllStackClient
             Log::warning('AllStack rate limit exceeded');
             return false;
         }
-    
+
         try {
+            // 👉 Add this line to track the request
+            $this->addBreadcrumb('http-request', 'Incoming request', [
+                'method' => $request->method(),
+                'url' => $request->fullUrl(),
+            ]);
+
             $payload = [
                 'path'        => $request->path(),
                 'method'      => $request->method(),
-                // Cast to (object) to ensure we get a JSON object ({}), not an array ([]).
                 'headers'     => (object) $this->clientHelper->transformHeaders($request->headers->all()),
                 'queryParams' => (object) $this->clientHelper->transformQueryParams($request->query()),
                 'body'        => (object) $this->clientHelper->transformRequestBody($request->all()),
@@ -123,26 +134,25 @@ class AllStackClient
                 'hostname'    => gethostname() ?: 'unknown',
                 'port'        => (string) $request->getPort(),
             ];
-    
+
             Log::debug('AllStack Request Payload', ['payload' => $payload]);
-    
+
             if (!$this->validatePayload($payload)) {
                 return false;
             }
-    
-            // Send the payload as JSON. The three (object) casts guarantee
-            // we end up with JSON objects for headers, queryParams, and body.
+
             $this->httpClient->request('POST', self::API_URL . '/http-request-transactions', [
                 'json' => $payload,
             ]);
-    
+
             return true;
         } catch (\Exception $e) {
             Log::error('Failed to send request to AllStack: ' . $e->getMessage());
             return false;
         }
     }
-    
+
+
 
 
     /**
@@ -193,5 +203,24 @@ class AllStackClient
             fn() => true
         );
     }
+
+    public function addBreadcrumb(string $eventType, string $message, array $metadata = []): void
+    {
+        if (!app()->bound('allstack.breadcrumbs')) {
+            app()->singleton('allstack.breadcrumbs', function () {
+                return collect();
+            });
+        }
+
+        $breadcrumb = [
+            'timestamp' => now()->toISOString(),
+            'type' => $eventType,
+            'message' => $message,
+            'metadata' => $metadata,
+        ];
+
+        app('allstack.breadcrumbs')->push($breadcrumb);
+    }
+
 
 }
