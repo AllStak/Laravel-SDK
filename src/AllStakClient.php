@@ -1,11 +1,11 @@
 <?php
 
-namespace Techsea\AllStak;
+namespace AllStak;
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;
-use Techsea\AllStak\Helpers\ClientHelper;
-use Techsea\AllStak\Helpers\SecurityHelper;
+use AllStak\Helpers\ClientHelper;
+use AllStak\Helpers\SecurityHelper;
 use Throwable;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpClient\HttpClient;

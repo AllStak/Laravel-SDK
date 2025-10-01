@@ -1,6 +1,6 @@
 <?php
 
-namespace Techsea\AllStak\Helpers;
+namespace AllStak\Helpers;
 
 use DateTimeInterface;
 use Throwable;

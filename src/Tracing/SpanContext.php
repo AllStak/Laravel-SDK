@@ -1,6 +1,6 @@
 <?php
 
-namespace Techsea\AllStak\Tracing;
+namespace AllStak\Tracing;
 
 class SpanContext
 {

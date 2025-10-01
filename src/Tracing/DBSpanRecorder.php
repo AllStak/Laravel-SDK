@@ -1,10 +1,10 @@
 <?php
 
 
-namespace Techsea\AllStak\Tracing;
+namespace AllStak\Tracing;
 
 use Illuminate\Database\Events\QueryExecuted;
-use Techsea\AllStak\AllStakClient;
+use AllStak\AllStakClient;
 
 class DBSpanRecorder
 {
