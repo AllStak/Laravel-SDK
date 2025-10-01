@@ -5,7 +5,7 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "AllStak\\\\": "src/"
+            "AllStak\\": "src/"
         }
     },
     "authors": [
@@ -25,7 +25,7 @@
     "extra": {
         "laravel": {
             "providers": [
-                "AllStak\\\\AllStakServiceProvider"
+                "AllStak\\AllStakServiceProvider"
             ]
         }
     },
