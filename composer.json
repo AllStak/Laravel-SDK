@@ -1,5 +1,5 @@
 {
-    "name": "AllStak/Laravel-SDK",
+    "name": "allstak/laravel-sdk",
     "description": "Official Laravel SDK for AllStak error tracking and monitoring",
     "type": "library",
     "license": "MIT",
@@ -13,22 +13,22 @@
             "name": "AllStak",
             "email": "info@allstak.io"
         }
-    ],
-    "require": {
-        "php": ">=7.2 <9.0",
-        "illuminate/support": "5.* || 6.* || 7.* || 8.* || 9.* || 10.* || 11.* || 12.*",
-        "symfony/http-client": "^4.4 || ^5.4 || ^6.0 || ^7.0"
-    },
-    "require-dev": {
-        "orchestra/testbench": "3.* || 4.* || 5.* || 6.* || 7.* || 8.* || 9.*"
-    },
-    "extra": {
-        "laravel": {
-            "providers": [
-                "AllStak\\AllStakServiceProvider"
-            ]
+        },
+        "require": {
+            "php": ">=7.2 <9.0",
+            "illuminate/support": "5.* || 6.* || 7.* || 8.* || 9.* || 10.* || 11.* || 12.*",
+            "symfony/http-client": "^4.4 || ^5.4 || ^6.0 || ^7.0"
+        },
+        "require-dev": {
+            "orchestra/testbench": "3.* || 4.* || 5.* || 6.* || 7.* || 8.* || 9.*"
+        },
+        "extra": {
+            "laravel": {
+                "providers": [
+                    "AllStak\\AllStakServiceProvider"
+                ]
+            }
+        },
+        "minimum-stability": "stable",
+        "prefer-stable": true
         }
-    },
-    "minimum-stability": "stable",
-    "prefer-stable": true
-}
