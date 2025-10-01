@@ -1,17 +1,17 @@
 {
-    "name": "techsea/AllStak-laravel",
+    "name": "AllStak/Laravel-SDK",
     "description": "Official Laravel SDK for AllStak error tracking and monitoring",
     "type": "library",
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Techsea\\AllStak\\": "src/"
+            "AllStak\\": "src/"
         }
     },
     "authors": [
         {
-            "name": "Techsea",
-            "email": "info@techsea.sa"
+            "name": "AllStak",
+            "email": "info@allstak.io"
         }
     ],
     "require": {
@@ -25,7 +25,7 @@
     "extra": {
         "laravel": {
             "providers": [
-                "Techsea\\AllStak\\AllStakServiceProvider"
+                "AllStak\\AllStakServiceProvider"
             ]
         }
     },
