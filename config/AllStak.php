@@ -3,14 +3,14 @@
 return [
     /*
     |--------------------------------------------------------------------------
-    | AllStack API Key
+    | AllStak API Key
     |--------------------------------------------------------------------------
     |
     | This is your AllStack API key which will be used to authenticate
     | your requests to the AllStack service.
     |
     */
-    'api_key' => env('ALLSTACK_API_KEY'),
+    'api_key' => env('ALLSTAK_API_KEY'),
 
     /*
     |--------------------------------------------------------------------------
@@ -21,5 +21,5 @@ return [
     | to separate logs from different environments.
     |
     */
-    'environment' => env('ALLSTACK_ENVIRONMENT', app()->environment()),
+    'environment' => env('ALLSTAC_ENVIRONMENT', app()->environment()),
 ];

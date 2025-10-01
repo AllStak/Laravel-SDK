@@ -2,15 +2,15 @@
 namespace Techsea\AllStack\Listeners;
 
 use Illuminate\Database\Events\QueryExecuted;
-use Techsea\AllStack\AllStackClient;
+use Techsea\AllStack\AllStakClient;
 
 class QuerySpanLogger
 {
     public function handle(QueryExecuted $event): void
     {
-        if (!app()->bound(AllStackClient::class)) return;
+        if (!app()->bound(AllStakClient::class)) return;
 
-        $client = app(AllStackClient::class);
+        $client = app(AllStakClient::class);
 
         $sql = str_replace(["\n", "\r", "\t"], ' ', $event->sql);
 

@@ -11,22 +11,25 @@ use Illuminate\Http\Request;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
-class AllStackClient
+class AllStakClient
 {
-    private const API_URL = 'https://api.allstak.io/api/client';
-    private const MAX_ATTEMPTS = 100;
+//    const API_URL = 'https://api.allstak.io/api/client';
+    const API_URL = 'http://localhost:8080/api/client';
+    const MAX_ATTEMPTS = 100;
 
     private string $apiKey;
     private string $environment;
+    private bool  $sendIpAddress;
     private HttpClientInterface $httpClient;
     private RateLimiter $rateLimiter;
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
 
-    public function __construct(string $apiKey, string $environment = 'production')
+    public function __construct(string $apiKey, string $environment = 'production', bool $sendIpAddress = false)
     {
         $this->apiKey = $apiKey;
         $this->environment = $environment;
+        $this->sendIpAddress = $sendIpAddress;
         $this->httpClient = HttpClient::create([
             'timeout' => 5,
             'headers' => [
@@ -67,8 +70,13 @@ class AllStackClient
                 'errorType'      => get_class($exception),
                 'errorLevel'     => $errorLevel,
                 'environment'    => $this->environment,
-                'ip'             => $this->securityHelper->maskIp(request()->ip()),
-                'userAgent'      => 'Laravel',
+                'ip'             =>  $this->sendIpAddress ? request()->ip() : $this.securityHelper->maskIp(request()->ip()),
+                'userAgent'      =>  request()->userAgent() ?? 'unknown',
+                'referer'        =>  request()->header('referer', 'unknown'),
+                'origin'         =>  request()->header('origin', 'unknown'),
+                'host'           =>  request()->getHost(),
+                'protocol'       =>  request()->getScheme(),
+                'port'           =>  (string) request()->getPort(),
                 'url'            => $this->securityHelper->sanitizeUrl(request()->fullUrl()),
                 'timestamp'      => $this->clientHelper->formatTimestamp(now()),
                 'additionalData' => [
@@ -86,7 +94,7 @@ class AllStackClient
                 'component'      => env('COMPONENT', 'my-component'),
                 'memoryUsage'    => $this->clientHelper->getMemoryUsage(),
                 'errorSeverity'  => $errorSeverity,
-                'breadcrumbs'    => $breadcrumbs, // ✅ NEW
+                'breadcrumbs'    => $breadcrumbs,
             ];
 
             Log::debug('AllStack Exception Payload', ['payload' => $payload]);
@@ -125,7 +133,7 @@ class AllStackClient
                 'headers'     => (object) $this->clientHelper->transformHeaders($request->headers->all()),
                 'queryParams' => (object) $this->clientHelper->transformQueryParams($request->query()),
                 'body'        => (object) $this->clientHelper->transformRequestBody($request->all()),
-                'ip'          => $this->securityHelper->maskIp($request->ip()),
+                "ip"          =>  $this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip()),
                 'userAgent'   => $request->userAgent() ?? 'unknown',
                 'referer'     => $request->header('referer', 'unknown'),
                 'origin'      => $request->header('origin', 'unknown'),

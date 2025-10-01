@@ -5,9 +5,9 @@ namespace Techsea\AllStack\Middleware;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Techsea\AllStack\AllStackClient;
+use Techsea\AllStack\AllStakClient;
 
-class AllStackMiddleware
+class AllStakMiddleware
 {
     protected $allstack;
 
@@ -26,7 +26,7 @@ class AllStackMiddleware
         'woff', 'woff2', 'ttf', 'eot', 'map', 'txt'
     ];
 
-    public function __construct(AllStackClient $allstack)
+    public function __construct(AllStakClient $allstack)
     {
         $this->allstack = $allstack;
     }
