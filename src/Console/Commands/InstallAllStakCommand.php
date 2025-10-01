@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\File;
 
 class InstallAllStakCommand extends Command
 {
-    protected $signature = 'allstak:install {--key=} {--env=production}';
+    protected $signature = 'allstak:install {--key=} {--environment=production}';
     protected $description = 'Wizard to install and configure AllStak SDK in your Laravel app';
 
     public function handle()
@@ -16,9 +16,9 @@ class InstallAllStakCommand extends Command
 
         // 1. Add API key + environment to .env
         $apiKey = $this->option('key') ?: $this->ask('Enter your AllStak API Key');
-        $environment = $this->option('env') ?: 'production';
+        $environment = $this->option('environment') ?: 'production';
         $this->updateEnv('ALLSTAK_API_KEY', $apiKey);
-        $this->updateEnv('ALLSTAK_ENVIRONMENT', $environment);
+        $this->updateEnv('ALLSTAK_ENV', $environment);
         $this->info('✅ .env updated with AllStak config');
 
         // 2. Create config/allstak.php
