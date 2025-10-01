@@ -13,9 +13,9 @@ class AllStakServiceProvider extends ServiceProvider
     {
         // Register the config file
         $this->mergeConfigFrom(
-            __DIR__.'/../config/allstak.php', 'allstak'
+            __DIR__ . '/../config/AllStakConfig.php', 'allstak'
         );
-
+        $this->app->alias(AllStakClient::class, 'allstak');
         $this->app->singleton(AllStakClient::class, function ($app) {
             $config = $app['config']['allstak'];
 
@@ -33,7 +33,7 @@ class AllStakServiceProvider extends ServiceProvider
     {
         // Publish the config file
         $this->publishes([
-            __DIR__.'/../config/allstak.php' => config_path('allstak.php')
+            __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
 
         // 1. HTTP request span (global middleware)
