@@ -1,13 +1,13 @@
-# AllStack Laravel SDK
+# AllStak Laravel SDK
 
-Official Laravel SDK for AllStack error tracking and monitoring by Techsea. This package provides seamless integration for error tracking and monitoring in your Laravel applications.
+Official Laravel SDK for AllStak error tracking and monitoring by Techsea. This package provides seamless integration for error tracking and monitoring in your Laravel applications.
 
 ## Installation
 
 You can install the package via composer:
 
 ```bash
-composer require techsea/allstack-laravel
+composer require AllStak/Laravel-SDK
 ```
 
 ## Configuration
@@ -15,8 +15,8 @@ composer require techsea/allstack-laravel
 1. Add the following variables to your `.env` file:
 
 ```env
-ALLSTACK_API_KEY=your-api-key
-ALLSTACK_ENVIRONMENT=production
+AllStak_API_KEY=your-api-key
+AllStak_ENVIRONMENT=production
 ```
 
 2. The service provider will be automatically registered thanks to Laravel's package discovery.
@@ -29,7 +29,7 @@ ALLSTACK_ENVIRONMENT=production
 try {
     // Your code here
 } catch (\Throwable $e) {
-    app(Techsea\AllStack\AllStackClient::class)->captureException($e);
+    app(Techsea\AllStak\AllStakClient::class)->captureException($e);
 }
 ```
 
@@ -40,14 +40,14 @@ Add the middleware to your `app/Http/Kernel.php`:
 ```php
 protected $middleware = [
     // ...
-    \Techsea\AllStack\Middleware\AllStackMiddleware::class,
+    \Techsea\AllStak\Middleware\AllStakMiddleware::class,
 ];
 ```
 
 Or use it in specific routes:
 
 ```php
-Route::middleware([\Techsea\AllStack\Middleware\AllStackMiddleware::class])->group(function () {
+Route::middleware([\Techsea\AllStak\Middleware\AllStakMiddleware::class])->group(function () {
     // Your routes here
 });
 ```
