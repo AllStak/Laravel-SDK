@@ -44,6 +44,12 @@ class AllStakServiceProvider extends ServiceProvider
             $recorder->record($query);
         });
 
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \AllStak\Console\Commands\InstallAllStakCommand::class,
+            ]);
+        }
+
     }
 
 }
