@@ -1,11 +1,11 @@
 <?php
 
-namespace Techsea\AllStack\Middleware;
+namespace Techsea\AllStak\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Techsea\AllStack\AllStakClient;
+use Techsea\AllStak\AllStakClient;
 
 class AllStakMiddleware
 {

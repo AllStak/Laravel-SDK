@@ -1,11 +1,11 @@
 <?php
 
-namespace Techsea\AllStack;
+namespace Techsea\AllStak;
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;
-use Techsea\AllStack\Helpers\ClientHelper;
-use Techsea\AllStack\Helpers\SecurityHelper;
+use Techsea\AllStak\Helpers\ClientHelper;
+use Techsea\AllStak\Helpers\SecurityHelper;
 use Throwable;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpClient\HttpClient;
@@ -19,13 +19,13 @@ class AllStakClient
 
     private string $apiKey;
     private string $environment;
-    private bool  $sendIpAddress;
+    private bool  $sendIpAddress = true;
     private HttpClientInterface $httpClient;
     private RateLimiter $rateLimiter;
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
 
-    public function __construct(string $apiKey, string $environment = 'production', bool $sendIpAddress = false)
+    public function __construct(string $apiKey, string $environment = 'production', bool $sendIpAddress = true)
     {
         $this->apiKey = $apiKey;
         $this->environment = $environment;
@@ -45,7 +45,7 @@ class AllStakClient
     public function captureException(Throwable $exception): bool
     {
         if ($this->shouldThrottle()) {
-            Log::warning('AllStack rate limit exceeded');
+            Log::warning('allstak rate limit exceeded');
             return false;
         }
 
@@ -59,18 +59,12 @@ class AllStakClient
                 5
             );
             $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);
-
-            // Get any breadcrumbs stored during the request lifecycle
-            $breadcrumbs = app()->bound('allstack.breadcrumbs')
-                ? app('allstack.breadcrumbs')->toArray()
-                : [];
-
             $payload = [
                 'errorMessage'   => $exception->getMessage() ?: 'Unknown Exception',
                 'errorType'      => get_class($exception),
                 'errorLevel'     => $errorLevel,
                 'environment'    => $this->environment,
-                'ip'             =>  $this->sendIpAddress ? request()->ip() : $this.securityHelper->maskIp(request()->ip()),
+                'ip'             =>  $this->sendIpAddress ? request()->ip() : $this->securityHelper->maskIp(request()->ip()),
                 'userAgent'      =>  request()->userAgent() ?? 'unknown',
                 'referer'        =>  request()->header('referer', 'unknown'),
                 'origin'         =>  request()->header('origin', 'unknown'),
@@ -94,10 +88,9 @@ class AllStakClient
                 'component'      => env('COMPONENT', 'my-component'),
                 'memoryUsage'    => $this->clientHelper->getMemoryUsage(),
                 'errorSeverity'  => $errorSeverity,
-                'breadcrumbs'    => $breadcrumbs,
             ];
 
-            Log::debug('AllStack Exception Payload', ['payload' => $payload]);
+            Log::debug('allstak Exception Payload', ['payload' => $payload]);
 
             if (!$this->validatePayload($payload)) {
                 return false;
@@ -108,7 +101,7 @@ class AllStakClient
             ]);
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send error to AllStack: ' . $e->getMessage());
+            Log::error('Failed to send error to allstak: ' . $e->getMessage());
             return false;
         }
     }
@@ -116,16 +109,12 @@ class AllStakClient
     public function captureRequest(Request $request, float $responseTime = 0): bool
     {
         if ($this->shouldThrottle()) {
-            Log::warning('AllStack rate limit exceeded');
+            Log::warning('allstak rate limit exceeded');
             return false;
         }
 
         try {
-            // 👉 Add this line to track the request
-            $this->addBreadcrumb('http-request', 'Incoming request', [
-                'method' => $request->method(),
-                'url' => $request->fullUrl(),
-            ]);
+
 
             $payload = [
                 'path'        => $request->path(),
@@ -143,7 +132,7 @@ class AllStakClient
                 'port'        => (string) $request->getPort(),
             ];
 
-            Log::debug('AllStack Request Payload', ['payload' => $payload]);
+            Log::debug('allstak Request Payload', ['payload' => $payload]);
 
             if (!$this->validatePayload($payload)) {
                 return false;
@@ -155,7 +144,43 @@ class AllStakClient
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send request to AllStack: ' . $e->getMessage());
+            Log::error('Failed to send request to allstak: ' . $e->getMessage());
+            return false;
+        }
+    }
+    public function sendDbSpan(array $span): bool
+    {
+        if ($this->shouldThrottle()) {
+            \Log::warning('allstak rate limit exceeded');
+            return false;
+        }
+        \Log::debug('sendDbSpan called', ['span' => $span]);
+
+        try {
+            $payload = [
+                'spanId'      => $span['id'],
+                'traceId'     => $span['trace_id'],
+                'parentSpanId'=> $span['parent_span_id'] ?? null,
+                'name'        => $span['name'],
+                'startTime'   => $span['start_time'],
+                'endTime'     => $span['end_time'],
+                'attributes'  => $span['attributes'],
+                'status'      => $span['status'] ?? 'ok',
+                'error'       => $span['error'] ?? null,
+                'environment' => $this->environment,
+                'hostname'    => gethostname(),
+                'component'   => env('COMPONENT', 'my-component'),
+            ];
+            \Log::debug('allstak DB Span Payload', ['payload' => $payload]);
+            if (!$this->validatePayload($payload)) {
+                return false;
+            }
+            $this->httpClient->request('POST', self::API_URL . '/db-span', [
+                'json' => $payload,
+            ]);
+            return true;
+        } catch (\Exception $e) {
+            \Log::error('Failed to send DB span to allstak: ' . $e->getMessage());
             return false;
         }
     }
@@ -188,7 +213,12 @@ class AllStakClient
                 'hostname',
                 'port'
             ];
-        } else {
+        }
+        else if (isset($payload['spanId'])) {
+            // DB span payload
+            $requiredFields = ['spanId', 'traceId', 'name', 'startTime', 'endTime', 'attributes', 'environment'];
+        }
+        else {
             // Exception payload
             $requiredFields = ['errorMessage', 'errorType', 'errorLevel', 'environment', 'timestamp'];
         }
@@ -206,29 +236,13 @@ class AllStakClient
     private function shouldThrottle(): bool
     {
         return !$this->rateLimiter->attempt(
-            'allstack-api',
+            'allstak-api',
             self::MAX_ATTEMPTS,
             fn() => true
         );
     }
 
-    public function addBreadcrumb(string $eventType, string $message, array $metadata = []): void
-    {
-        if (!app()->bound('allstack.breadcrumbs')) {
-            app()->singleton('allstack.breadcrumbs', function () {
-                return collect();
-            });
-        }
 
-        $breadcrumb = [
-            'timestamp' => now()->toISOString(),
-            'type' => $eventType,
-            'message' => $message,
-            'metadata' => $metadata,
-        ];
-
-        app('allstack.breadcrumbs')->push($breadcrumb);
-    }
 
 
 }

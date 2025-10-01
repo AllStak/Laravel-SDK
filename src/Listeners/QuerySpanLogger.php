@@ -1,8 +1,8 @@
 <?php
-namespace Techsea\AllStack\Listeners;
+namespace Techsea\AllStak\Listeners;
 
 use Illuminate\Database\Events\QueryExecuted;
-use Techsea\AllStack\AllStakClient;
+use Techsea\AllStak\AllStakClient;
 
 class QuerySpanLogger
 {

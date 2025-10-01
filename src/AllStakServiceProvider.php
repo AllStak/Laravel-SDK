@@ -1,8 +1,10 @@
 <?php
 
-namespace Techsea\AllStack;
+namespace Techsea\AllStak;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
+use Techsea\AllStak\Tracing\DBSpanRecorder;
 
 class AllStakServiceProvider extends ServiceProvider
 {
@@ -32,5 +34,16 @@ class AllStakServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__.'/../config/AllStak.php' => config_path('AllStak.php')
         ], 'allstack-config');
+
+        // 1. HTTP request span (global middleware)
+        $this->app['router']->pushMiddlewareToGroup('web', \Techsea\AllStak\Middleware\AllStakTracingMiddleware::class);
+        $this->app['router']->pushMiddlewareToGroup('api', \Techsea\AllStak\Middleware\AllStakTracingMiddleware::class);
+
+        $recorder = new DBSpanRecorder(app(AllStakClient::class));
+        DB::listen(function ($query) use ($recorder) {
+            $recorder->record($query);
+        });
+
     }
+
 }

@@ -1,6 +1,6 @@
 <?php
 
-namespace Techsea\AllStack\Helpers;
+namespace Techsea\AllStak\Helpers;
 
 class SecurityHelper
 {
