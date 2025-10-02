@@ -1,44 +1,70 @@
 <?php
+
 namespace AllStak\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\Response;
 use AllStak\AllStakClient;
 use AllStak\Tracing\SpanContext;
 
 class AllStakTracingMiddleware
 {
-    public function handle(Request $request, Closure $next): Response
+    protected $client;
+
+    public function __construct(AllStakClient $client)
     {
-        $client = app(AllStakClient::class);
-        // Generate unique trace and span IDs
+        $this->client = $client;
+    }
+
+    public function handle(Request $request, Closure $next)
+    {
+        // Generate trace and span IDs
         $traceId = bin2hex(random_bytes(16));
         $spanId = bin2hex(random_bytes(8));
-        SpanContext::setTraceId($traceId);
-        SpanContext::setParentSpanId($spanId);
 
-        // Start the root span for the HTTP request
-        $span = $client->startSpan('http.request', $traceId, null, $spanId);
-        $span->setAttribute('method', $request->method());
-        $span->setAttribute('url', $request->fullUrl());
-        $span->setAttribute('ip', $request->ip());
-        $span->setAttribute('user_agent', $request->userAgent());
+        // Set context
+        SpanContext::setTraceId($traceId);
+        SpanContext::setParentSpanId(null);
+
+        // Start transaction (not just a span)
+        $transaction = $this->client->startTransaction(
+            $request->method() . ' ' . $request->path(),
+            'http.request',
+            [
+                'http.method' => $request->method(),
+                'http.url' => $request->fullUrl(),
+                'http.ip' => $request->ip(),
+                'http.user_agent' => $request->userAgent(),
+            ]
+        );
 
         try {
             $response = $next($request);
-            $span->setAttribute('status_code', $response->getStatusCode());
-            $span->setStatus('ok');
+
+            // Add status code to transaction
+            $transaction['attributes']['http.status_code'] = $response->getStatusCode();
+
+            // Determine status
+            $status = $response->getStatusCode() >= 200 && $response->getStatusCode() < 400 ? 'ok' : 'error';
+
+            $this->client->finishTransaction($transaction, $status);
+
             return $response;
         } catch (\Throwable $e) {
-            $span->setStatus('error');
-            $span->recordException($e);
-            $client->captureException($e);
+            // Capture exception
+            $this->client->captureException($e);
+
+            // Finish transaction with error
+            $this->client->finishTransaction($transaction, 'error', [
+                'exception' => get_class($e),
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
             throw $e;
         } finally {
-            $span->end();
-            $client->sendSpan($span);
-            SpanContext::clear(); // Clean up after the request
+            // Clean up context
+            SpanContext::clear();
         }
     }
 }

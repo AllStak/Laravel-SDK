@@ -279,7 +279,7 @@ class AllStakClient
     /**
      * Send a span to AllStak API
      */
-    private function sendSpan(array $span): bool
+    public function sendSpan(array $span): bool
     {
         if ($this->shouldThrottle()) {
             Log::warning('allstak rate limit exceeded');
