@@ -17,7 +17,7 @@ class SpanContext
         return self::$currentTraceId;
     }
 
-    public static function setParentSpanId(string $spanId): void
+    public static function setParentSpanId(?string $spanId): void
     {
         self::$currentParentSpanId = $spanId;
     }
