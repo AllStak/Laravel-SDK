@@ -75,6 +75,10 @@ class AllStakClient
                 'origin'         =>  request()->header('origin', 'unknown'),
                 'host'           =>  request()->getHost(),
                 'protocol'       =>  request()->getScheme(),
+                'traceId' => SpanContext::getTraceId(),
+                'spanId' => SpanContext::getParentSpanId(),
+                'parentSpanId' => SpanContext::getParentSpanId(),
+                'breadcrumbs' => $this->getBreadcrumbs(),
                 'port'           =>  (string) request()->getPort(),
                 'url'            => $this->securityHelper->sanitizeUrl(request()->fullUrl()),
                 'timestamp'      => $this->clientHelper->formatTimestamp(now()),
@@ -93,6 +97,11 @@ class AllStakClient
                 'component'      => env('COMPONENT', 'my-component'),
                 'memoryUsage'    => $this->clientHelper->getMemoryUsage(),
                 'errorSeverity'  => $errorSeverity,
+                'span' => $this->currentSpan ? [
+                    'id' => $this->currentSpan['id'],
+                    'name' => $this->currentSpan['name'],
+                    'start_time' => $this->currentSpan['start_time'],
+                ] : null,
             ];
 
             Log::debug('allstak Exception Payload', ['payload' => $payload]);

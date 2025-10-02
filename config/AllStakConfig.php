@@ -16,7 +16,21 @@ return [
     'slow_request_threshold' => env('ALLSTAK_SLOW_REQUEST_MS', 1000),
     'release' => env('ALLSTAK_RELEASE', env('APP_VERSION')),
     'git_commit' => env('GIT_COMMIT_SHA'),
+    'slow_query_threshold' => env('ALLSTAK_SLOW_QUERY_THRESHOLD', 1000),
 
+    // Database tables to ignore from tracing
+    'ignored_db_tables' => [
+        'cache',
+        'sessions',
+        'migrations',
+        'jobs',
+        'failed_jobs',
+        'password_resets',
+        'password_reset_tokens',
+        'telescope_entries',
+        'telescope_entries_tags',
+        'telescope_monitoring',
+    ],
     // Paths to exclude from tracing
     'excluded_paths' => [
         '/health',
