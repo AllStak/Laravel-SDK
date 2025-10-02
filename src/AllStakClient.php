@@ -288,19 +288,19 @@ class AllStakClient
 
         try {
             $payload = [
-                'spanId'      => $span['id'],
-                'traceId'     => $span['trace_id'],
+                'spanId' => $span['id'],
+                'traceId' => $span['trace_id'],
                 'parentSpanId'=> $span['parent_span_id'] ?? null,
-                'name'        => $span['name'],
-                'op'          => $span['op'] ?? 'custom',
-                'startTime'   => $span['start_time'],
-                'endTime'     => $span['end_time'],
-                'attributes'  => $span['attributes'] ?? [],
-                'status'      => $span['status'] ?? 'ok',
-                'error'       => $span['error'] ?? null,
+                'name' => $span['name'],
+                'op' => $span['op'] ?? 'custom',
+                'startTime' => $span['start_time'],
+                'endTime' => $span['end_time'],
+                'attributes' => $span['attributes'] ?? [],
+                'status' => $span['status'] ?? 'ok',
+                'error' => $span['error'] ?? null,
                 'environment' => $this->environment,
-                'hostname'    => gethostname(),
-                'component'   => env('COMPONENT', 'my-component'),
+                'hostname' => gethostname(),
+                'component' => env('COMPONENT', 'my-component'),
             ];
 
             Log::debug('allstak Span Payload', ['payload' => $payload]);
@@ -309,13 +309,25 @@ class AllStakClient
                 return false;
             }
 
-            $this->httpClient->request('POST', self::API_URL . '/spans', [
+            // Log the actual request being made
+            $url = self::API_URL . '/spans';
+            Log::debug('Sending span to AllStak', ['url' => $url, 'payload' => $payload]);
+
+            $response = $this->httpClient->request('POST', $url, [
                 'json' => $payload,
             ]);
 
+            $statusCode = $response->getStatusCode();
+            Log::debug('AllStak span response', ['status_code' => $statusCode]);
+
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send span to allstak: ' . $e->getMessage());
+            Log::error('Failed to send span to allstak', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'url' => self::API_URL . '/spans',
+                'span_id' => $span['id'] ?? 'unknown',
+            ]);
             return false;
         }
     }
