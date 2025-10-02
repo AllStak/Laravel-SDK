@@ -50,7 +50,7 @@ class AllStakClient
     public function captureException(Throwable $exception): bool
     {
         if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
+            Log::warning('AllStak rate limit exceeded');
             return false;
         }
 
@@ -104,9 +104,10 @@ class AllStakClient
                 ] : null,
             ];
 
-            Log::debug('allstak Exception Payload', ['payload' => $payload]);
+            Log::debug('AllStak Exception Payload', ['payload' => $payload]);
 
             if (!$this->validatePayload($payload)) {
+                Log::warning("Payload validation failed", ['payload' => $payload]);
                 return false;
             }
 
@@ -115,7 +116,7 @@ class AllStakClient
             ]);
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send error to allstak: ' . $e->getMessage());
+            Log::error('Failed to send error to AllStak: ' . $e->getMessage());
             return false;
         }
     }
