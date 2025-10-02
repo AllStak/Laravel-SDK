@@ -2,6 +2,7 @@
 
 namespace AllStak;
 
+use AllStak\Tracing\SpanContext;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;
 use AllStak\Helpers\ClientHelper;
@@ -24,9 +25,11 @@ class AllStakClient
     private RateLimiter $rateLimiter;
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
-
+    protected $currentTransaction = null;
+    protected $currentSpan = null;
     public function __construct(string $apiKey, string $environment = 'production', bool $sendIpAddress = true)
     {
+
         $this->apiKey = $apiKey;
         $this->environment = $environment;
         $this->sendIpAddress = $sendIpAddress;
@@ -189,6 +192,158 @@ class AllStakClient
 
 
     /**
+     * Start a new transaction (root span)
+     */
+    public function startTransaction(string $name, string $op = 'http.server'): array
+    {
+        $transaction = [
+            'id' => bin2hex(random_bytes(8)),
+            'trace_id' => bin2hex(random_bytes(16)),
+            'parent_span_id' => null,
+            'name' => $name,
+            'op' => $op,
+            'start_time' => microtime(true),
+            'end_time' => null,
+            'attributes' => [],
+            'status' => 'ok',
+            'children' => [],
+        ];
+
+        $this->currentTransaction = $transaction;
+        $this->currentSpan = $transaction;
+
+        // Store in SpanContext for global access
+        SpanContext::setTraceId($transaction['trace_id']);
+        SpanContext::setParentSpanId($transaction['id']);
+
+        return $transaction;
+    }
+
+    /**
+     * Start a child span
+     */
+    public function startSpan(string $name, string $op = 'custom', ?array $parentSpan = null): array
+    {
+        $parent = $parentSpan ?? $this->currentSpan;
+
+        if (!$parent) {
+            throw new \RuntimeException('No parent span or transaction found. Call startTransaction() first.');
+        }
+
+        $span = [
+            'id' => bin2hex(random_bytes(8)),
+            'trace_id' => $parent['trace_id'],
+            'parent_span_id' => $parent['id'],
+            'name' => $name,
+            'op' => $op,
+            'start_time' => microtime(true),
+            'end_time' => null,
+            'attributes' => [],
+            'status' => 'ok',
+        ];
+
+        $this->currentSpan = $span;
+        SpanContext::setParentSpanId($span['id']);
+
+        return $span;
+    }
+
+    /**
+     * Finish a span and send it
+     */
+    public function finishSpan(array &$span): void
+    {
+        $span['end_time'] = microtime(true);
+
+        // Send the span
+        $this->sendSpan($span);
+
+        // Restore parent span as current
+        if ($span['parent_span_id']) {
+            SpanContext::setParentSpanId($span['parent_span_id']);
+        }
+    }
+
+    /**
+     * Finish the transaction
+     */
+    public function finishTransaction(array &$transaction): void
+    {
+        $transaction['end_time'] = microtime(true);
+        $this->sendSpan($transaction);
+
+        $this->currentTransaction = null;
+        $this->currentSpan = null;
+    }
+
+    /**
+     * Send a span to AllStak API
+     */
+    private function sendSpan(array $span): bool
+    {
+        if ($this->shouldThrottle()) {
+            Log::warning('allstak rate limit exceeded');
+            return false;
+        }
+
+        try {
+            $payload = [
+                'spanId'      => $span['id'],
+                'traceId'     => $span['trace_id'],
+                'parentSpanId'=> $span['parent_span_id'] ?? null,
+                'name'        => $span['name'],
+                'op'          => $span['op'] ?? 'custom',
+                'startTime'   => $span['start_time'],
+                'endTime'     => $span['end_time'],
+                'attributes'  => $span['attributes'] ?? [],
+                'status'      => $span['status'] ?? 'ok',
+                'error'       => $span['error'] ?? null,
+                'environment' => $this->environment,
+                'hostname'    => gethostname(),
+                'component'   => env('COMPONENT', 'my-component'),
+            ];
+
+            Log::debug('allstak Span Payload', ['payload' => $payload]);
+
+            if (!$this->validateSpanPayload($payload)) {
+                return false;
+            }
+
+            $this->httpClient->request('POST', self::API_URL . '/spans', [
+                'json' => $payload,
+            ]);
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Failed to send span to allstak: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Validate span payload
+     */
+    private function validateSpanPayload(array $payload): bool
+    {
+        $requiredFields = ['spanId', 'traceId', 'name', 'startTime', 'endTime', 'environment'];
+
+        foreach ($requiredFields as $field) {
+            if (!isset($payload[$field]) || $payload[$field] === '') {
+                Log::warning("Missing required span field: {$field}", ['payload' => $payload]);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+
+
+
+
+
+
+    /**
      * Validates the payload.
      *
      * If the payload contains a "path" key, we assume it’s from captureRequest;
@@ -241,6 +396,8 @@ class AllStakClient
             fn() => true
         );
     }
+
+
 
 
 
