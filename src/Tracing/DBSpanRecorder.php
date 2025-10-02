@@ -54,6 +54,19 @@ class DBSpanRecorder
                 'status' => 'ok',
             ];
 
+            // Add breadcrumb for this db query
+            $this->client->addBreadcrumb(
+                'db',
+                'Database query executed',
+                [
+                    'sql' => $query->sql,
+                    'bindings' => $query->bindings,
+                    'time_ms' => $query->time,
+                    'connection' => $query->connectionName,
+                ],
+                'info'
+            );
+
             $this->client->sendDbSpan($span);
         } finally {
             self::$isRecording = false;

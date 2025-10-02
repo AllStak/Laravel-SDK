@@ -4,6 +4,7 @@ namespace AllStak;
 
 use AllStak\Console\Commands\InstallAllStakCommand;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
 use AllStak\Tracing\DBSpanRecorder;
 
@@ -45,6 +46,16 @@ class AllStakServiceProvider extends ServiceProvider
         DB::listen(function ($query) use ($recorder) {
             $recorder->record($query);
         });
+
+        // Add to service provider
+        Event::listen('cache.hit', function ($key, $value) {
+            app(AllStakClient::class)->addBreadcrumb('cache', "Cache hit: {$key}");
+        });
+
+        Event::listen('cache.missed', function ($key) {
+            app(AllStakClient::class)->addBreadcrumb('cache', "Cache miss: {$key}");
+        });
+
 
         // 3. Register console commands
         if ($this->app->runningInConsole()) {

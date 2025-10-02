@@ -17,7 +17,9 @@ class AllStakClient
 //    const API_URL = 'https://api.allstak.io/api/client';
     const API_URL = 'http://localhost:8080/api/client';
     const MAX_ATTEMPTS = 100;
-
+    protected $breadcrumbs = [];
+    protected $spanBuffer = [];
+    const MAX_BREADCRUMBS = 100;
     private string $apiKey;
     private string $environment;
     private bool  $sendIpAddress = true;
@@ -301,6 +303,7 @@ class AllStakClient
                 'environment' => $this->environment,
                 'hostname' => gethostname(),
                 'component' => env('COMPONENT', 'my-component'),
+                "breadcrumbs" => $this->getBreadcrumbs(),
             ];
 
             Log::debug('allstak Span Payload', ['payload' => $payload]);
@@ -349,6 +352,82 @@ class AllStakClient
         return true;
     }
 
+    public function trackPerformanceMetric(string $name, float $value, array $tags = []): void
+    {
+        $this->sendMetric([
+            'name' => $name,
+            'value' => $value,
+            'type' => 'gauge',
+            'tags' => $tags,
+            'timestamp' => microtime(true),
+        ]);
+    }
+
+    public function addBreadcrumb(string $category, string $message, array $data = [], string $level = 'info'): void
+    {
+        $breadcrumb = [
+            'timestamp' => microtime(true),
+            'category' => $category,
+            'message' => $message,
+            'data' => $data,
+            'level' => $level,
+        ];
+
+        $this->breadcrumbs[] = $breadcrumb;
+
+        // Limit stored breadcrumbs
+        if (count($this->breadcrumbs) > self::MAX_BREADCRUMBS) {
+            array_shift($this->breadcrumbs); // Remove oldest
+        }
+    }
+
+    /**
+     * Get all stored breadcrumbs
+     *
+     * @return array
+     */
+    public function getBreadcrumbs(): array
+    {
+        return $this->breadcrumbs;
+    }
+
+    /**
+     * Clear all breadcrumbs
+     */
+    public function clearBreadcrumbs(): void
+    {
+        $this->breadcrumbs = [];
+    }
+
+    public function setUser(array $user): void
+    {
+        $this->userContext = [
+            'id' => $user['id'] ?? null,
+            'email' => $user['email'] ?? null,
+            'username' => $user['username'] ?? null,
+            'ip_address' => $user['ip'] ?? null,
+            'segment' => $user['segment'] ?? null,
+        ];
+    }
+
+
+
+    protected function bufferSpan(array $span): void
+    {
+        $this->spanBuffer[] = $span;
+
+        if (count($this->spanBuffer) >= 10) {
+            $this->flushSpans();
+        }
+    }
+
+    protected function flushSpans(): void
+    {
+        $this->httpClient->request('POST', self::API_URL . '/spans/batch', [
+            'json' => ['spans' => $this->spanBuffer],
+        ]);
+        $this->spanBuffer = [];
+    }
 
 
 
