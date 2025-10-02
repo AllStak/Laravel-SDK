@@ -3,7 +3,7 @@
 namespace AllStak;
 
 use AllStak\Console\Commands\InstallAllStakCommand;
-use AllStak\Listeners\DBSpanRecorder;
+use AllStak\Tracing\DBSpanRecorder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;

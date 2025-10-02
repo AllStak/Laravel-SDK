@@ -1,9 +1,8 @@
 <?php
 
-namespace AllStak\Listeners;
+namespace AllStak\Tracing;
 
 use AllStak\AllStakClient;
-use AllStak\Tracing\SpanContext;
 use Illuminate\Database\Events\QueryExecuted;
 
 class DBSpanRecorder
