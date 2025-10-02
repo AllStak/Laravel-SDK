@@ -22,8 +22,16 @@ class DBSpanRecorder
             return;
         }
 
-        // Skip cache queries to reduce noise and prevent issues
+        // Skip internal Laravel queries
         if ($this->shouldSkipQuery($query->sql)) {
+            return;
+        }
+
+        // Check if we have a valid trace context
+        $traceId = SpanContext::getTraceId();
+        if (!$traceId) {
+            // No active trace context, skip this query
+            \Log::debug('No active trace context, skipping DB span', ['sql' => $query->sql]);
             return;
         }
 
@@ -32,7 +40,7 @@ class DBSpanRecorder
         try {
             $span = [
                 'id' => bin2hex(random_bytes(8)),
-                'trace_id' => SpanContext::getTraceId(),
+                'trace_id' => $traceId,
                 'parent_span_id' => SpanContext::getParentSpanId(),
                 'name' => 'db.query',
                 'start_time' => microtime(true) - ($query->time / 1000),
@@ -59,35 +67,27 @@ class DBSpanRecorder
     {
         $sql = strtolower(trim($sql));
 
-        // Skip cache table queries
-        $cachePatterns = [
-            'select * from "cache"',
-            'select * from `cache`',
-            'insert into "cache"',
-            'insert into `cache`',
-            'update "cache"',
-            'update `cache`',
-            'delete from "cache"',
-            'delete from `cache`',
-        ];
-
-        foreach ($cachePatterns as $pattern) {
-            if (strpos($sql, $pattern) === 0) {
-                return true;
-            }
-        }
-
-        // Skip internal Laravel queries (optional - adjust as needed)
-        $internalPatterns = [
-            'migrations',
+        // Skip internal Laravel tables
+        $skipTables = [
+            'cache',
             'sessions',
+            'migrations',
             'jobs',
             'failed_jobs',
+            'password_resets',
+            'password_reset_tokens',
         ];
 
-        foreach ($internalPatterns as $table) {
+        foreach ($skipTables as $table) {
+            // Check for various SQL patterns
             if (strpos($sql, "from \"{$table}\"") !== false ||
-                strpos($sql, "from `{$table}`") !== false) {
+                strpos($sql, "from `{$table}`") !== false ||
+                strpos($sql, "into \"{$table}\"") !== false ||
+                strpos($sql, "into `{$table}`") !== false ||
+                strpos($sql, "update \"{$table}\"") !== false ||
+                strpos($sql, "update `{$table}`") !== false ||
+                strpos($sql, "delete from \"{$table}\"") !== false ||
+                strpos($sql, "delete from `{$table}`") !== false) {
                 return true;
             }
         }
