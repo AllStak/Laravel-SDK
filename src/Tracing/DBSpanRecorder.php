@@ -1,6 +1,5 @@
 <?php
 
-
 namespace AllStak\Tracing;
 
 use Illuminate\Database\Events\QueryExecuted;
@@ -18,15 +17,19 @@ class DBSpanRecorder
 
     public function record(QueryExecuted $query)
     {
+        // Prevent recursive recording
         if (self::$isRecording) {
+            return;
+        }
+
+        // Skip cache queries to reduce noise and prevent issues
+        if ($this->shouldSkipQuery($query->sql)) {
             return;
         }
 
         self::$isRecording = true;
 
         try {
-            \Log::debug('DBSpanRecorder::record called', ['sql' => $query->sql]);
-
             $span = [
                 'id' => bin2hex(random_bytes(8)),
                 'trace_id' => SpanContext::getTraceId(),
@@ -42,9 +45,53 @@ class DBSpanRecorder
                 ],
                 'status' => 'ok',
             ];
+
             $this->client->sendDbSpan($span);
         } finally {
             self::$isRecording = false;
         }
+    }
+
+    /**
+     * Determine if a query should be skipped from tracing
+     */
+    protected function shouldSkipQuery(string $sql): bool
+    {
+        $sql = strtolower(trim($sql));
+
+        // Skip cache table queries
+        $cachePatterns = [
+            'select * from "cache"',
+            'select * from `cache`',
+            'insert into "cache"',
+            'insert into `cache`',
+            'update "cache"',
+            'update `cache`',
+            'delete from "cache"',
+            'delete from `cache`',
+        ];
+
+        foreach ($cachePatterns as $pattern) {
+            if (strpos($sql, $pattern) === 0) {
+                return true;
+            }
+        }
+
+        // Skip internal Laravel queries (optional - adjust as needed)
+        $internalPatterns = [
+            'migrations',
+            'sessions',
+            'jobs',
+            'failed_jobs',
+        ];
+
+        foreach ($internalPatterns as $table) {
+            if (strpos($sql, "from \"{$table}\"") !== false ||
+                strpos($sql, "from `{$table}`") !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
