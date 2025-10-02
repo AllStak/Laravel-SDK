@@ -2,12 +2,13 @@
 
 namespace AllStak\Middleware;
 
+use AllStak\AllStakClient;
+use AllStak\Tracing\SpanContext;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Config;
-use AllStak\AllStakClient;
-use AllStak\Tracing\SpanContext;
+use Symfony\Component\HttpFoundation\Response;
 
 class AllStakTracingMiddleware
 {
@@ -30,8 +31,9 @@ class AllStakTracingMiddleware
         $parentSpanId = $this->extractParentSpanId($request);
         $spanId = bin2hex(random_bytes(8));
 
+        // 🔧 FIX 1: Set trace context properly - current span becomes parent for children
         SpanContext::setTraceId($traceId);
-        SpanContext::setParentSpanId($parentSpanId);
+        SpanContext::setParentSpanId($spanId); // Current span ID becomes parent for DB queries
 
         // Add breadcrumb for request start
         $this->client->addBreadcrumb(
@@ -49,9 +51,14 @@ class AllStakTracingMiddleware
         // Create transaction with enriched attributes
         $transaction = $this->client->startTransaction(
             $this->getTransactionName($request),
-            'http.request',
-            $this->buildAttributes($request)
+            'http.request'
         );
+
+        // 🔧 FIX 2: Override transaction IDs for distributed tracing
+        $transaction['id'] = $spanId;
+        $transaction['trace_id'] = $traceId;
+        $transaction['parent_span_id'] = $parentSpanId;
+        $transaction['attributes'] = $this->buildAttributes($request);
 
         // Add span events for request processing milestones
         $requestStart = microtime(true);
@@ -61,16 +68,22 @@ class AllStakTracingMiddleware
 
             // Calculate response generation time
             $processingTime = microtime(true) - $requestStart;
+            $statusCode = $response->getStatusCode();
+
+            // 🔧 FIX 3: Determine if response is an error
+            $isError = $statusCode >= 400;
+            $breadcrumbLevel = $isError ? 'error' : 'info';
 
             // Add breadcrumb for response
             $this->client->addBreadcrumb(
                 'http',
                 'Response sent',
                 [
-                    'status_code' => $response->getStatusCode(),
+                    'status_code' => $statusCode,
                     'content_type' => $response->headers->get('Content-Type'),
+                    'processing_time_ms' => round($processingTime * 1000, 2),
                 ],
-                'info'
+                $breadcrumbLevel
             );
 
             // Add response attributes
@@ -82,28 +95,35 @@ class AllStakTracingMiddleware
             // Add custom business metrics if available
             $this->addBusinessMetrics($transaction, $request, $response);
 
-            // Determine status based on response
-            $status = $this->determineStatus($response);
-
-            // Add span events
-            if (isset($transaction['events'])) {
-                $transaction['events'] = array_merge($transaction['events'], [
-                    [
-                        'name' => 'request.completed',
-                        'timestamp' => microtime(true),
-                        'attributes' => [
-                            'processing_time_ms' => round($processingTime * 1000, 2),
-                        ],
-                    ],
-                ]);
+            // 🔧 FIX 4: Set proper status and error message based on response
+            if ($isError) {
+                $transaction['status'] = 'error';
+                $transaction['error'] = "HTTP {$statusCode} response";
+            } else {
+                $transaction['status'] = 'ok';
+                $transaction['error'] = null;
             }
 
-            $this->client->finishTransaction($transaction, $status);
+            // Add span events
+            if (!isset($transaction['events'])) {
+                $transaction['events'] = [];
+            }
+
+            $transaction['events'][] = [
+                'name' => 'request.completed',
+                'timestamp' => microtime(true),
+                'attributes' => [
+                    'processing_time_ms' => round($processingTime * 1000, 2),
+                ],
+            ];
+
+            $this->client->finishTransaction($transaction);
 
             // Add trace headers to response for client-side tracing
             $this->addTraceHeadersToResponse($response, $traceId, $spanId);
 
             return $response;
+
         } catch (\Throwable $e) {
             // Add breadcrumb for exception
             $this->client->addBreadcrumb(
@@ -112,25 +132,25 @@ class AllStakTracingMiddleware
                 [
                     'exception_class' => get_class($e),
                     'message' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
                 ],
                 'error'
             );
 
-            // Capture exception with full context
+            // 🔧 FIX 5: Capture exception BEFORE finishing transaction
+            // This ensures breadcrumbs are included in exception payload
             $this->client->captureException($e);
 
             // Add exception details to transaction
+            $transaction['status'] = 'error';
+            $transaction['error'] = $e->getMessage();
             $transaction['attributes']['exception.type'] = get_class($e);
             $transaction['attributes']['exception.message'] = $e->getMessage();
             $transaction['attributes']['exception.file'] = $e->getFile();
             $transaction['attributes']['exception.line'] = $e->getLine();
 
-            $this->client->finishTransaction($transaction, 'error', [
-                'exception' => get_class($e),
-                'message' => $e->getMessage(),
-                'stacktrace' => $e->getTraceAsString(),
-            ]);
+            $this->client->finishTransaction($transaction);
 
             throw $e;
         }
@@ -177,6 +197,9 @@ class AllStakTracingMiddleware
             '/status',
             '/readiness',
             '/liveness',
+            '/_debugbar',
+            '/telescope',
+            '/horizon',
         ];
 
         return in_array($request->path(), $healthCheckPaths);
@@ -187,7 +210,7 @@ class AllStakTracingMiddleware
      */
     protected function isStaticAsset(Request $request): bool
     {
-        $extensions = ['css', 'js', 'jpg', 'jpeg', 'png', 'gif', 'svg', 'ico', 'woff', 'woff2', 'ttf', 'eot'];
+        $extensions = ['css', 'js', 'jpg', 'jpeg', 'png', 'gif', 'svg', 'ico', 'woff', 'woff2', 'ttf', 'eot', 'map'];
         $path = $request->path();
 
         foreach ($extensions as $ext) {
@@ -206,21 +229,18 @@ class AllStakTracingMiddleware
     {
         // Support multiple trace header formats
         $traceHeaders = [
-            'x-trace-id',           // Custom
-            'traceparent',          // W3C Trace Context
-            'x-b3-traceid',         // Zipkin B3
-            'x-amzn-trace-id',      // AWS X-Ray
+            'x-trace-id',        // Custom
+            'traceparent',       // W3C Trace Context
+            'x-b3-traceid',      // Zipkin B3
+            'x-amzn-trace-id',   // AWS X-Ray
         ];
 
         foreach ($traceHeaders as $header) {
             $value = $request->header($header);
             if ($value) {
                 // Parse W3C traceparent format: 00-traceid-spanid-flags
-                if ($header === 'traceparent') {
-                    $parts = explode('-', $value);
-                    if (count($parts) >= 2) {
-                        return $parts[1];
-                    }
+                if ($header === 'traceparent' && preg_match('/^00-([a-f0-9]{32})-[a-f0-9]{16}-[a-f0-9]{2}$/', $value, $matches)) {
+                    return $matches[1];
                 }
                 return $value;
             }
@@ -236,11 +256,8 @@ class AllStakTracingMiddleware
     {
         // W3C traceparent format: 00-traceid-spanid-flags
         $traceparent = $request->header('traceparent');
-        if ($traceparent) {
-            $parts = explode('-', $traceparent);
-            if (count($parts) >= 3) {
-                return $parts[2];
-            }
+        if ($traceparent && preg_match('/^00-[a-f0-9]{32}-([a-f0-9]{16})-[a-f0-9]{2}$/', $traceparent, $matches)) {
+            return $matches[1];
         }
 
         return $request->header('x-parent-span-id');
@@ -358,7 +375,6 @@ class AllStakTracingMiddleware
     protected function addBusinessMetrics(array &$transaction, Request $request, $response): void
     {
         // Add custom tags/attributes based on your business logic
-        // Examples:
 
         // API version
         if ($request->header('api-version')) {
@@ -375,24 +391,6 @@ class AllStakTracingMiddleware
     }
 
     /**
-     * Determine transaction status
-     */
-    protected function determineStatus($response): string
-    {
-        $statusCode = $response->getStatusCode();
-
-        if ($statusCode >= 500) {
-            return 'error';
-        } elseif ($statusCode >= 400) {
-            return 'error';
-        } elseif ($statusCode >= 200 && $statusCode < 400) {
-            return 'ok';
-        }
-
-        return 'unknown';
-    }
-
-    /**
      * Add trace headers to response for distributed tracing
      */
     protected function addTraceHeadersToResponse($response, string $traceId, string $spanId): void
@@ -406,8 +404,8 @@ class AllStakTracingMiddleware
         $response->headers->set('Traceparent', $traceparent);
 
         // For frontend integration (similar to Sentry meta tags)
-        if ($response->headers->get('content-type') === 'text/html') {
-            // You can inject meta tags here if needed
+        if (str_contains($response->headers->get('content-type', ''), 'text/html')) {
+            // You can inject meta tags here if needed for browser-side tracing
         }
     }
 
