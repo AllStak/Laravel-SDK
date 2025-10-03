@@ -49,6 +49,7 @@ class AllStakClient
 
     public function captureException(Throwable $exception): bool
     {
+        Log::info("captureException called", ['exception' => $exception]);
         if ($this->shouldThrottle()) {
             Log::warning('AllStak rate limit exceeded');
             return false;
@@ -64,50 +65,60 @@ class AllStakClient
                 5
             );
             $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);
+
+            $now = microtime(true);
             $payload = [
-                'errorMessage'   => $exception->getMessage() ?: 'Unknown Exception',
-                'errorType'      => get_class($exception),
-                'errorLevel'     => $errorLevel,
-                'environment'    => $this->environment,
-                'ip'             =>  $this->sendIpAddress ? request()->ip() : $this->securityHelper->maskIp(request()->ip()),
-                'userAgent'      =>  request()->userAgent() ?? 'unknown',
-                'referer'        =>  request()->header('referer', 'unknown'),
-                'origin'         =>  request()->header('origin', 'unknown'),
-                'host'           =>  request()->getHost(),
-                'protocol'       =>  request()->getScheme(),
-                'traceId' => SpanContext::getTraceId(),
-                'spanId' => SpanContext::getParentSpanId(),
+                'name'         => $exception->getMessage() ?: get_class($exception),
+                'errorMessage' => $exception->getMessage() ?: 'Unknown Exception',
+                'errorType'    => get_class($exception),
+                'errorLevel'   => $errorLevel,
+                'environment'  => $this->environment,
+                'ip'           => $this->sendIpAddress ? request()->ip() : $this->securityHelper->maskIp(request()->ip()),
+                'userAgent'    => request()->userAgent() ?? 'unknown',
+                'referer'      => request()->header('referer', 'unknown'),
+                'origin'       => request()->header('origin', 'unknown'),
+                'host'         => request()->getHost(),
+                'protocol'     => request()->getScheme(),
+                'port'         => (string) request()->getPort(),
+                'url'          => $this->securityHelper->sanitizeUrl(request()->fullUrl()),
+
+                'traceId'      => SpanContext::getTraceId(),
+                'spanId'       => SpanContext::getParentSpanId(),
                 'parentSpanId' => SpanContext::getParentSpanId(),
-                'breadcrumbs' => $this->getBreadcrumbs(),
-                'port'           =>  (string) request()->getPort(),
-                'url'            => $this->securityHelper->sanitizeUrl(request()->fullUrl()),
-                'timestamp'      => $this->clientHelper->formatTimestamp(now()),
-                'additionalData' => [
+                'breadcrumbs'  => $this->getBreadcrumbs(),
+
+                'startTime'    => microtime(true),
+                'endTime'      => microtime(true),
+                'timestamp'    => $this->clientHelper->formatTimestamp(now()),
+
+                'attributes'   => [
                     'file'        => $exception->getFile(),
                     'line'        => $exception->getLine(),
                     'trace'       => $exception->getTraceAsString(),
                     'hostname'    => gethostname(),
                     'codeContext' => $maskedCodeContext,
+                    'memoryUsage' => $this->clientHelper->getMemoryUsage(),
+                    'errorCategory'=> $this->clientHelper->determineErrorCategory($exception),
+                    'errorCause'  => $this->clientHelper->determineErrorCause($exception),
                 ],
-                'stackTrace'     => (object) $this->clientHelper->formatStackTrace($exception),
-                'contexts'       => $this->clientHelper->createContexts(),
-                'errorCategory'  => $this->clientHelper->determineErrorCategory($exception),
-                'errorCause'     => $this->clientHelper->determineErrorCause($exception),
-                'release'        => env('RELEASE', '1.0.0'),
-                'component'      => env('COMPONENT', 'my-component'),
-                'memoryUsage'    => $this->clientHelper->getMemoryUsage(),
-                'errorSeverity'  => $errorSeverity,
+
+                'stackTrace'  => (object) $this->clientHelper->formatStackTrace($exception),
+                'release'     => env('RELEASE', '1.0.0'),
+                'component'   => env('COMPONENT', 'my-component'),
+                'errorSeverity' => $errorSeverity,
+
                 'span' => $this->currentSpan ? [
-                    'id' => $this->currentSpan['id'],
-                    'name' => $this->currentSpan['name'],
+                    'id'         => $this->currentSpan['id'],
+                    'name'       => $this->currentSpan['name'],
                     'start_time' => $this->currentSpan['start_time'],
                 ] : null,
             ];
 
+
             Log::debug('AllStak Exception Payload', ['payload' => $payload]);
 
             if (!$this->validatePayload($payload)) {
-                Log::warning("Payload validation failed", ['payload' => $payload]);
+                Log::debug("Payload validation failed", ['payload' => $payload]);
                 return false;
             }
 
