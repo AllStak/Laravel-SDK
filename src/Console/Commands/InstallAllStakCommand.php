@@ -171,18 +171,17 @@ PHP;
             if (strpos($content, '$this->reportable') === false) {
                 $content = preg_replace(
                     '/public function register\(\)\s*\{/',
-                    "public function register()\n    {\n        \$this->reportable(function (\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n",
+                    "public function register()\n    {\n        \$this->reportable(function (\\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n",
                     $content,
                     1
                 );
             } else {
                 $content = preg_replace(
                     '/\$this->reportable\(function\s*\(\\\Throwable \$e\)\s*\{[^}]*\}\);/m',
-                    "\$this->reportable(function (\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });",
+                    "\$this->reportable(function (\\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });",
                     $content,
                     1
                 );
-
             }
 
             File::put($handlerPath, $content);
@@ -201,16 +200,37 @@ PHP;
 
         $content = File::get($handlerPath);
 
+        // Remove AllStak use statement
         $content = preg_replace('/use AllStak\\\\AllStakClient;/', '', $content);
 
+        // Remove the closure inside the register method that references AllStakClient
         $content = preg_replace(
-            '/\$this->reportable\(function\s*\(\\Throwable \$e\)\s*\{[^}]*app\(AllStakClient::class\)->captureException\(\$e\);[^}]*\}\);/m',
+            '/\$this->reportable\(function\s*\(\\\Throwable \$e\)\s*\{[^}]*app\(AllStakClient::class\)->captureException\(\$e\);[^}]*\}\);/m',
             '',
             $content
         );
 
         File::put($handlerPath, $content);
         $this->info('✅ Reverted Exception Handler patch related to AllStak');
+    }
+
+    private function revertSentryPatch()
+    {
+        $handlerPath = app_path('Exceptions/Handler.php');
+        if (!File::exists($handlerPath)) {
+            return;
+        }
+
+        $content = File::get($handlerPath);
+
+        // Remove Sentry use statements
+        $content = preg_replace('/use Sentry\\\\Laravel\\\\Integration;/', '', $content);
+
+        // Remove lines calling Sentry captureUnhandledException or similar
+        $content = preg_replace('/Sentry\\\\Laravel\\\\Integration::captureUnhandledException\(.*\);/', '', $content);
+
+        File::put($handlerPath, $content);
+        $this->info('✅ Reverted Exception Handler patch related to Sentry');
     }
 
     private function clearCachesAndAutoload()
@@ -244,6 +264,7 @@ PHP;
 
                     if ($name === 'Sentry') {
                         $this->revertHandlerPatch();
+                        $this->revertSentryPatch();
                         $this->clearCachesAndAutoload();
                     }
                 } else {
