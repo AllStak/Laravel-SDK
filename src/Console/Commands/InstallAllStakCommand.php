@@ -237,21 +237,24 @@ PHP;
             return;
         }
 
-        // Restore backup of Handler.php automatically before cleaning
-        $this->restoreHandlerBackup();
-
         $content = File::get($handlerPath);
 
-        // Remove all use statements referencing Sentry
-        $content = preg_replace('/use\s+Sentry\\\\Laravel\\\\Integration\s*;/', '', $content);
+        // Remove all Sentry-related use statements
+        $content = preg_replace('/use\s+Sentry\\\\[^;]+;/m', '', $content);
 
-        // Remove all static method calls on Sentry Integration (any method)
-        $content = preg_replace('/Sentry\\\\Laravel\\\\Integration::[a-zA-Z0-9_]+\([^)]*\);/', '', $content);
+        // Remove any line containing Sentry\Laravel\Integration calls
+        $content = preg_replace('/.*Sentry\\\\Laravel\\\\Integration::[^;]+;.*\n?/m', '', $content);
+
+        // Remove any line containing just "Sentry" namespace references
+        $content = preg_replace('/.*\\\\Sentry\\\\[^;]+;.*\n?/m', '', $content);
 
         File::put($handlerPath, $content);
-
-        $this->info('✅ Fully reverted Exception Handler patches related to Sentry');
+        $this->info('✅ Reverted Exception Handler patches related to Sentry');
     }
+
+
+
+
     private function clearCachesAndAutoload()
     {
         $this->info('🔄 Clearing caches and regenerating optimized autoload...');
@@ -278,13 +281,19 @@ PHP;
         foreach ($this->knownPackages as $name => $package) {
             if (isset($composer['require'][$package])) {
                 if ($this->confirm("Detected {$name} package. Remove it?")) {
+
+                    // CRITICAL: Revert patches BEFORE removing the package
+                    if ($name === 'Sentry') {
+                        $this->revertSentryPatch();
+                        $this->revertHandlerPatch();
+                    }
+
+                    // Now safe to remove the package
                     exec("composer remove {$package}");
                     $this->info("✅ Removed {$name} package.");
 
+                    // Clear caches after removal
                     if ($name === 'Sentry') {
-                        // Fully revert any Sentry patches automatically
-                        $this->revertHandlerPatch();
-                        $this->revertSentryPatch();
                         $this->clearCachesAndAutoload();
                     }
                 } else {
@@ -293,4 +302,5 @@ PHP;
             }
         }
     }
+
 }
