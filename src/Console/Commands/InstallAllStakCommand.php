@@ -213,6 +213,22 @@ PHP;
         File::put($handlerPath, $content);
         $this->info('✅ Reverted Exception Handler patch related to AllStak');
     }
+    private function restoreHandlerBackup()
+    {
+        $handlerPath = app_path('Exceptions/Handler.php');
+        $backupPathPattern = $handlerPath . '.bak_*';
+
+        $backups = glob($backupPathPattern);
+        if (count($backups) > 0) {
+            // Sort backups by modification time descending
+            usort($backups, function ($a, $b) {
+                return filemtime($b) - filemtime($a);
+            });
+            $latestBackup = $backups[0];
+            File::copy($latestBackup, $handlerPath);
+            $this->info("✅ Restored Handler.php from backup: {$latestBackup}");
+        }
+    }
 
     private function revertSentryPatch()
     {
@@ -221,27 +237,30 @@ PHP;
             return;
         }
 
+        // Restore backup of Handler.php automatically before cleaning
+        $this->restoreHandlerBackup();
+
         $content = File::get($handlerPath);
 
-        // Remove Sentry use statements
-        $content = preg_replace('/use Sentry\\\\Laravel\\\\Integration;/', '', $content);
+        // Remove all use statements referencing Sentry
+        $content = preg_replace('/use\s+Sentry\\\\Laravel\\\\Integration\s*;/', '', $content);
 
-        // Remove lines calling Sentry captureUnhandledException or similar
-        $content = preg_replace('/Sentry\\\\Laravel\\\\Integration::captureUnhandledException\(.*\);/', '', $content);
+        // Remove all static method calls on Sentry Integration (any method)
+        $content = preg_replace('/Sentry\\\\Laravel\\\\Integration::[a-zA-Z0-9_]+\([^)]*\);/', '', $content);
 
         File::put($handlerPath, $content);
-        $this->info('✅ Reverted Exception Handler patch related to Sentry');
-    }
 
+        $this->info('✅ Fully reverted Exception Handler patches related to Sentry');
+    }
     private function clearCachesAndAutoload()
     {
-        $this->info('🔄 Clearing caches and regenerating autoload...');
-        exec('composer dump-autoload');
+        $this->info('🔄 Clearing caches and regenerating optimized autoload...');
+        exec('composer dump-autoload -o');
         exec('php artisan config:clear');
         exec('php artisan cache:clear');
         exec('php artisan route:clear');
         exec('php artisan view:clear');
-        $this->info('✅ Caches cleared and autoload regenerated.');
+        $this->info('✅ All caches cleared and optimized autoload regenerated.');
     }
 
     private function checkAndRemoveCompetitors()
@@ -263,6 +282,7 @@ PHP;
                     $this->info("✅ Removed {$name} package.");
 
                     if ($name === 'Sentry') {
+                        // Fully revert any Sentry patches automatically
                         $this->revertHandlerPatch();
                         $this->revertSentryPatch();
                         $this->clearCachesAndAutoload();
