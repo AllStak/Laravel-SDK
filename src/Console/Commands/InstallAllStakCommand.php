@@ -177,11 +177,12 @@ PHP;
                 );
             } else {
                 $content = preg_replace(
-                    '/\$this->reportable\(function\s*\(\\Throwable \$e\)\s*\{[^}]*\}\);/m',
+                    '/\$this->reportable\(function\s*\(\\\Throwable \$e\)\s*\{[^}]*\}\);/m',
                     "\$this->reportable(function (\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });",
                     $content,
                     1
                 );
+
             }
 
             File::put($handlerPath, $content);
