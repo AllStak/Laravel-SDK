@@ -146,19 +146,19 @@ PHP;
         }
     }
 
-    private function createFreshHandler()
+    private function createMinimalSafeHandler()
     {
         $handlerPath = app_path('Exceptions/Handler.php');
 
         // Backup existing handler
         if (File::exists($handlerPath)) {
-            $backup = $handlerPath . '.bak_' . time();
+            $backup = $handlerPath . '.bak_sentry_' . time();
             File::copy($handlerPath, $backup);
-            $this->info("Backup created: {$backup}");
+            $this->info("🔒 Backup created: {$backup}");
         }
 
-        // Create fresh Laravel Handler
-        $freshHandler = <<<'PHP'
+        // Create minimal safe handler with NO error reporting integrations
+        $safeHandler = <<<'PHP'
 <?php
 
 namespace App\Exceptions;
@@ -168,49 +168,23 @@ use Throwable;
 
 class Handler extends ExceptionHandler
 {
-    /**
-     * A list of exception types with their corresponding custom log levels.
-     *
-     * @var array<class-string<\Throwable>, \Psr\Log\LogLevel::*>
-     */
-    protected $levels = [
-        //
-    ];
-
-    /**
-     * A list of the exception types that are not reported.
-     *
-     * @var array<int, class-string<\Throwable>>
-     */
-    protected $dontReport = [
-        //
-    ];
-
-    /**
-     * A list of the inputs that are never flashed to the session on validation exceptions.
-     *
-     * @var array<int, string>
-     */
+    protected $levels = [];
+    protected $dontReport = [];
     protected $dontFlash = [
         'current_password',
         'password',
         'password_confirmation',
     ];
 
-    /**
-     * Register the exception handling callbacks for the application.
-     *
-     * @return void
-     */
     public function register()
     {
-        //
+        // Intentionally empty - no error reporting during migration
     }
 }
 PHP;
 
-        File::put($handlerPath, $freshHandler);
-        $this->info('✅ Created fresh Exception Handler');
+        File::put($handlerPath, $safeHandler);
+        $this->info('✅ Created minimal safe Exception Handler');
     }
 
     private function patchHandler()
@@ -232,8 +206,8 @@ PHP;
             );
 
             $content = preg_replace(
-                '/public function register\(\)\s*\{/',
-                "public function register()\n    {\n        \$this->reportable(function (\\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n",
+                '/public function register\(\)\s*\{[^}]*\}/',
+                "public function register()\n    {\n        \$this->reportable(function (\\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n    }",
                 $content,
                 1
             );
@@ -245,22 +219,37 @@ PHP;
         }
     }
 
-    private function clearCachesAndAutoload()
+    private function aggressiveCacheClear()
     {
-        $this->info('🔄 Clearing caches and regenerating optimized autoload...');
+        $this->info('🔄 Aggressively clearing all caches...');
 
-        shell_exec('composer dump-autoload -o 2>&1');
-        shell_exec('php artisan config:clear 2>&1');
-        shell_exec('php artisan cache:clear 2>&1');
-        shell_exec('php artisan route:clear 2>&1');
-        shell_exec('php artisan view:clear 2>&1');
+        // Clear Laravel caches
+        @shell_exec('php artisan config:clear 2>&1');
+        @shell_exec('php artisan cache:clear 2>&1');
+        @shell_exec('php artisan route:clear 2>&1');
+        @shell_exec('php artisan view:clear 2>&1');
+        @shell_exec('php artisan clear-compiled 2>&1');
+
+        // Clear Composer autoload
+        @shell_exec('composer dump-autoload --no-scripts 2>&1');
 
         // Clear opcache if available
         if (function_exists('opcache_reset')) {
-            opcache_reset();
+            @opcache_reset();
         }
 
-        $this->info('✅ All caches cleared and optimized autoload regenerated.');
+        // Clear bootstrap cache files
+        $bootstrapCache = base_path('bootstrap/cache');
+        if (File::exists($bootstrapCache)) {
+            $files = File::files($bootstrapCache);
+            foreach ($files as $file) {
+                if ($file->getFilename() !== '.gitignore') {
+                    @unlink($file->getPathname());
+                }
+            }
+        }
+
+        $this->info('✅ All caches aggressively cleared');
     }
 
     private function checkAndRemoveCompetitors()
@@ -279,22 +268,29 @@ PHP;
             if (isset($composer['require'][$package])) {
                 if ($this->confirm("⚠️  Detected {$name}. Do you want to remove it?", true)) {
 
-                    $this->info("🔄 Preparing to remove {$name}...");
+                    $this->info("🔄 Preparing to remove {$name} safely...");
 
-                    // For Sentry, create fresh handler first
                     if ($name === 'Sentry') {
-                        $this->createFreshHandler();
-                        $this->clearCachesAndAutoload();
-                    }
+                        // Step 1: Create minimal safe handler
+                        $this->createMinimalSafeHandler();
 
-                    // Remove the package
-                    $this->info("Removing {$package}...");
-                    shell_exec("composer remove {$package} 2>&1");
-                    $this->info("✅ Removed {$name} package.");
+                        // Step 2: Aggressive cache clear
+                        $this->aggressiveCacheClear();
 
-                    // Clear everything again after removal
-                    if ($name === 'Sentry') {
-                        $this->clearCachesAndAutoload();
+                        // Step 3: Remove Sentry package without running scripts
+                        $this->info("Removing {$package}...");
+                        shell_exec("composer remove {$package} --no-scripts 2>&1");
+
+                        // Step 4: Run composer dump-autoload separately
+                        shell_exec("composer dump-autoload --no-scripts 2>&1");
+
+                        // Step 5: Final aggressive cache clear
+                        $this->aggressiveCacheClear();
+
+                        $this->info("✅ Removed {$name} package safely.");
+                    } else {
+                        shell_exec("composer remove {$package} 2>&1");
+                        $this->info("✅ Removed {$name} package.");
                     }
                 } else {
                     $this->warn("⚠️  Skipped {$name} removal. Please remove manually to avoid conflicts.");
