@@ -10,36 +10,36 @@ class InstallAllStakCommand extends Command
     protected $signature = 'allstak:install {--key=} {--environment=production}';
     protected $description = 'Wizard to install and configure AllStak SDK in your Laravel app';
 
+    private $knownPackages = [
+        'Sentry' => 'sentry/sentry-laravel',
+        'Bugsnag' => 'bugsnag/bugsnag-laravel',
+        'Rollbar' => 'rollbar/rollbar-laravel',
+        'NewRelic' => 'newrelic/newrelic-php-agent',
+    ];
+
     public function handle()
     {
         $this->info('⚡ Installing AllStak...');
 
-        // 1. Add API key + environment to .env
         $apiKey = $this->option('key') ?: $this->ask('Enter your AllStak API Key');
         $environment = $this->option('environment') ?: 'production';
+
         $this->updateEnv('ALLSTAK_API_KEY', $apiKey);
         $this->updateEnv('ALLSTAK_ENV', $environment);
-        $this->info('✅ .env updated with AllStak config');
+        $this->info('✅ Updated .env');
 
-        // 2. Create config/allstak.php
-        $configPath = config_path('allstak.php');
-        if (!File::exists($configPath)) {
-            File::put($configPath, $this->getConfigStub());
-            $this->info('✅ Config file created: config/allstak.php');
-        } else {
-            $this->warn('⚠️ Config file already exists, skipped.');
-        }
+        $this->createConfigFile();
 
-        // 3. Patch Kernel.php (middleware)
+        $this->createCaptureExceptionHelper();
+
         $this->patchKernel();
 
-        // 4. Patch Exception Handler
         $this->patchHandler();
 
-        // 5. Check for Sentry
-        $this->checkSentry();
+        $this->checkAndRemoveCompetitors();
 
-        $this->info('🎉 AllStak installation completed successfully!');
+        $this->info("🎉 AllStak installation completed!");
+        $this->info("Please use: 'use function AllStak\\captureException;' for error capturing in your project.");
     }
 
     private function updateEnv($key, $value)
@@ -49,11 +49,22 @@ class InstallAllStakCommand extends Command
 
         $content = File::get($envPath);
 
-        if (strpos($content, $key . '=') === false) {
+        if (strpos($content, "{$key}=") === false) {
             File::append($envPath, "\n{$key}={$value}\n");
         } else {
             $content = preg_replace("/^{$key}=.*/m", "{$key}={$value}", $content);
             File::put($envPath, $content);
+        }
+    }
+
+    private function createConfigFile()
+    {
+        $configPath = config_path('allstak.php');
+        if (!File::exists($configPath)) {
+            File::put($configPath, $this->getConfigStub());
+            $this->info('✅ Created config/allstak.php');
+        } else {
+            $this->warn('⚠️ Config file exists, skipping.');
         }
     }
 
@@ -63,93 +74,144 @@ class InstallAllStakCommand extends Command
 <?php
 
 return [
-
-    /*
-    |--------------------------------------------------------------------------
-    | AllStak API Key
-    |--------------------------------------------------------------------------
-    */
     'api_key' => env('ALLSTAK_API_KEY'),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Environment
-    |--------------------------------------------------------------------------
-    */
-    'environment' => env('ALLSTAK_ENVIRONMENT', 'production'),
-
+    'environment' => env('ALLSTAK_ENV', 'production'),
     'enabled' => true,
 ];
+PHP;
+    }
+
+    private function createCaptureExceptionHelper()
+    {
+        $helperDir = base_path('app/Helpers');
+        if (!File::exists($helperDir)) {
+            mkdir($helperDir, 0755, true);
+        }
+
+        $helperFile = $helperDir . '/CaptureException.php';
+        if (!File::exists($helperFile)) {
+            File::put($helperFile, $this->getHelperStub());
+            $this->info("✅ Created helper file at app/Helpers/CaptureException.php");
+        } else {
+            $this->warn('⚠️ Helper file already exists, skipping.');
+        }
+    }
+
+    private function getHelperStub()
+    {
+        return <<<PHP
+<?php
+
+namespace AllStak;
+
+use Throwable;
+use AllStak\AllStakClient;
+
+if (!function_exists('AllStak\\captureException')) {
+    function captureException(Throwable \$exception)
+    {
+        app(AllStakClient::class)->captureException(\$exception);
+    }
+}
 PHP;
     }
 
     private function patchKernel()
     {
         $kernelPath = app_path('Http/Kernel.php');
-        if (!File::exists($kernelPath)) return;
+        if (!File::exists($kernelPath)) {
+            $this->warn("Kernel file not found.");
+            return;
+        }
 
         $content = File::get($kernelPath);
-        if (strpos($content, 'AllStak\Middleware\AllStakMiddleware::class') === false) {
-            $content = str_replace(
-                "protected \$middleware = [",
-                "protected \$middleware = [\n        \AllStak\Middleware\AllStakMiddleware::class,",
-                $content
+        $middlewareClass = '\AllStak\Middleware\AllStakMiddleware::class';
+
+        if (strpos($content, $middlewareClass) === false) {
+            $backup = $kernelPath . '.bak_' . time();
+            File::copy($kernelPath, $backup);
+            $this->info("Backup created: {$backup}");
+
+            $content = preg_replace(
+                '/protected \$middleware = \[.*?\];/s',
+                "protected \$middleware = [\n        {$middlewareClass},\n    ];",
+                $content,
+                1
             );
+
             File::put($kernelPath, $content);
-            $this->info('✅ AllStakMiddleware added to Kernel.php');
+            $this->info('✅ Patched Kernel.php with AllStak middleware');
         } else {
-            $this->warn('⚠️ Middleware already exists in Kernel.php, skipped.');
+            $this->warn('⚠️ Middleware already patched.');
         }
     }
 
     private function patchHandler()
     {
         $handlerPath = app_path('Exceptions/Handler.php');
-        if (!File::exists($handlerPath)) return;
+        if (!File::exists($handlerPath)) {
+            $this->warn("Exception Handler not found.");
+            return;
+        }
 
         $content = File::get($handlerPath);
+        $alreadyPatched = strpos($content, 'AllStak\\AllStakClient') !== false;
 
-        if (strpos($content, 'AllStakClient') === false) {
-            // Add use statement
+        if (!$alreadyPatched) {
+            $backup = $handlerPath . '.bak_' . time();
+            File::copy($handlerPath, $backup);
+            $this->info("Backup created: {$backup}");
+
             $content = preg_replace(
                 '/namespace App\\\\Exceptions;(\s+)/',
                 "namespace App\\Exceptions;\n\nuse AllStak\\AllStakClient;$1",
-                $content
+                $content,
+                1
             );
 
-            // Add reportable() block if not exists
             if (strpos($content, '$this->reportable') === false) {
                 $content = preg_replace(
                     '/public function register\(\)\s*\{/',
-                    "public function register()\n    {\n        \$this->reportable(function (Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n",
-                    $content
+                    "public function register()\n    {\n        \$this->reportable(function (\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n",
+                    $content,
+                    1
                 );
             } else {
                 $content = preg_replace(
-                    '/\$this->reportable\(function\s*\(Throwable \$e\)\s*\{[^}]*\}\);/m',
-                    "\$this->reportable(function (Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });",
-                    $content
+                    '/\$this->reportable\(function\s*\(\\Throwable \$e\)\s*\{[^}]*\}\);/m',
+                    "\$this->reportable(function (\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });",
+                    $content,
+                    1
                 );
             }
 
             File::put($handlerPath, $content);
-            $this->info('✅ Exception Handler patched for AllStak');
+            $this->info('✅ Patched Exception Handler for AllStak');
         } else {
-            $this->warn('⚠️ Handler already patched, skipped.');
+            $this->warn('⚠️ Exception Handler already patched.');
         }
     }
 
-    private function checkSentry()
+    private function checkAndRemoveCompetitors()
     {
         $composerJsonPath = base_path('composer.json');
-        if (!File::exists($composerJsonPath)) return;
+        if (!File::exists($composerJsonPath)) {
+            return;
+        }
 
-        $composerJson = json_decode(File::get($composerJsonPath), true);
+        $composer = json_decode(File::get($composerJsonPath), true);
+        if (!isset($composer['require'])) {
+            return;
+        }
 
-        if (isset($composerJson['require']['sentry/sentry-laravel'])) {
-            if ($this->confirm('⚠️ Sentry detected. Do you want to remove it?')) {
-                exec('composer remove sentry/sentry-laravel');
-                $this->info('✅ Sentry removed from project.');
+        foreach ($this->knownPackages as $name => $package) {
+            if (isset($composer['require'][$package])) {
+                if ($this->confirm("Detected {$name} package. Remove it?")) {
+                    exec("composer remove {$package}");
+                    $this->info("✅ Removed {$name} package.");
+                } else {
+                    $this->warn("⚠️ Please remove {$name} manually to avoid conflicts.");
+                }
             }
         }
     }
