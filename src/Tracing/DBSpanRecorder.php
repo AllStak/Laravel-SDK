@@ -1,6 +1,6 @@
 <?php
 
-namespace AllStak\Listeners;
+namespace AllStak\Tracing;
 
 use AllStak\AllStakClient;
 use AllStak\Helpers\SecurityHelper;
