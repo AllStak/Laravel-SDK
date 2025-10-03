@@ -40,6 +40,9 @@ class InstallAllStakCommand extends Command
 
         $this->info("🎉 AllStak installation completed!");
         $this->info("Please use: 'use function AllStak\\captureException;' for error capturing in your project.");
+
+        // Force exit to prevent any cached code from running
+        exit(0);
     }
 
     private function updateEnv($key, $value)
@@ -146,20 +149,66 @@ PHP;
         }
     }
 
-    private function createMinimalSafeHandler()
+    private function removeSentryFromHandler()
     {
         $handlerPath = app_path('Exceptions/Handler.php');
 
-        // Backup existing handler
+        if (!File::exists($handlerPath)) {
+            return;
+        }
+
+        // Backup
+        $backup = $handlerPath . '.bak_sentry_removal_' . time();
+        File::copy($handlerPath, $backup);
+        $this->info("🔒 Backup created: {$backup}");
+
+        // Read file line by line
+        $lines = file($handlerPath);
+        $cleanedLines = [];
+        $skipNextBrace = false;
+
+        foreach ($lines as $line) {
+            $trimmedLine = trim($line);
+
+            // Skip any line containing "Sentry"
+            if (stripos($line, 'Sentry') !== false) {
+                continue;
+            }
+
+            // Skip any line containing "Integration"
+            if (stripos($line, 'Integration') !== false) {
+                continue;
+            }
+
+            $cleanedLines[] = $line;
+        }
+
+        // Write cleaned content
+        file_put_contents($handlerPath, implode('', $cleanedLines));
+
+        // Force file system sync
+        if (function_exists('fsync')) {
+            $fp = fopen($handlerPath, 'r');
+            fsync($fp);
+            fclose($fp);
+        }
+
+        $this->info('✅ Removed all Sentry references from Handler.php');
+    }
+
+    private function createCleanHandler()
+    {
+        $handlerPath = app_path('Exceptions/Handler.php');
+
+        // Backup existing
         if (File::exists($handlerPath)) {
-            $backup = $handlerPath . '.bak_sentry_' . time();
+            $backup = $handlerPath . '.bak_clean_' . time();
             File::copy($handlerPath, $backup);
             $this->info("🔒 Backup created: {$backup}");
         }
 
-        // Create minimal safe handler with NO error reporting integrations
-        $safeHandler = <<<'PHP'
-<?php
+        // Create completely clean handler
+        $cleanHandler = '<?php
 
 namespace App\Exceptions;
 
@@ -169,22 +218,30 @@ use Throwable;
 class Handler extends ExceptionHandler
 {
     protected $levels = [];
+    
     protected $dontReport = [];
+    
     protected $dontFlash = [
-        'current_password',
-        'password',
-        'password_confirmation',
+        \'current_password\',
+        \'password\',
+        \'password_confirmation\',
     ];
 
     public function register()
     {
-        // Intentionally empty - no error reporting during migration
+        // Clean handler - no integrations
     }
 }
-PHP;
+';
 
-        File::put($handlerPath, $safeHandler);
-        $this->info('✅ Created minimal safe Exception Handler');
+        // Write with file_put_contents for direct disk write
+        file_put_contents($handlerPath, $cleanHandler);
+        chmod($handlerPath, 0644);
+
+        // Force sync
+        clearstatcache(true, $handlerPath);
+
+        $this->info('✅ Created clean Exception Handler');
     }
 
     private function patchHandler()
@@ -195,33 +252,51 @@ PHP;
             return;
         }
 
-        $content = File::get($handlerPath);
+        // Create fresh handler with AllStak
+        $handlerWithAllStak = '<?php
 
-        if (strpos($content, 'AllStak\\AllStakClient') === false) {
-            $content = preg_replace(
-                '/namespace App\\\\Exceptions;(\s+)/',
-                "namespace App\\Exceptions;\n\nuse AllStak\\AllStakClient;$1",
-                $content,
-                1
-            );
+namespace App\Exceptions;
 
-            $content = preg_replace(
-                '/public function register\(\)\s*\{[^}]*\}/',
-                "public function register()\n    {\n        \$this->reportable(function (\\\Throwable \$e) {\n            app(AllStakClient::class)->captureException(\$e);\n        });\n    }",
-                $content,
-                1
-            );
+use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Throwable;
+use AllStak\AllStakClient;
 
-            File::put($handlerPath, $content);
-            $this->info('✅ Patched Exception Handler for AllStak');
-        } else {
-            $this->warn('⚠️ Exception Handler already patched.');
-        }
+class Handler extends ExceptionHandler
+{
+    protected $levels = [];
+    
+    protected $dontReport = [];
+    
+    protected $dontFlash = [
+        \'current_password\',
+        \'password\',
+        \'password_confirmation\',
+    ];
+
+    public function register()
+    {
+        $this->reportable(function (Throwable $e) {
+            app(AllStakClient::class)->captureException($e);
+        });
+    }
+}
+';
+
+        file_put_contents($handlerPath, $handlerWithAllStak);
+        chmod($handlerPath, 0644);
+        clearstatcache(true, $handlerPath);
+
+        $this->info('✅ Patched Exception Handler for AllStak');
     }
 
     private function aggressiveCacheClear()
     {
-        $this->info('🔄 Aggressively clearing all caches...');
+        $this->info('🔄 Clearing all caches...');
+
+        // Clear opcache FIRST
+        if (function_exists('opcache_reset')) {
+            opcache_reset();
+        }
 
         // Clear Laravel caches
         @shell_exec('php artisan config:clear 2>&1');
@@ -230,15 +305,7 @@ PHP;
         @shell_exec('php artisan view:clear 2>&1');
         @shell_exec('php artisan clear-compiled 2>&1');
 
-        // Clear Composer autoload
-        @shell_exec('composer dump-autoload --no-scripts 2>&1');
-
-        // Clear opcache if available
-        if (function_exists('opcache_reset')) {
-            @opcache_reset();
-        }
-
-        // Clear bootstrap cache files
+        // Clear bootstrap cache
         $bootstrapCache = base_path('bootstrap/cache');
         if (File::exists($bootstrapCache)) {
             $files = File::files($bootstrapCache);
@@ -249,7 +316,10 @@ PHP;
             }
         }
 
-        $this->info('✅ All caches aggressively cleared');
+        // Clear stat cache
+        clearstatcache(true);
+
+        $this->info('✅ All caches cleared');
     }
 
     private function checkAndRemoveCompetitors()
@@ -271,20 +341,26 @@ PHP;
                     $this->info("🔄 Preparing to remove {$name} safely...");
 
                     if ($name === 'Sentry') {
-                        // Step 1: Create minimal safe handler
-                        $this->createMinimalSafeHandler();
+                        // Step 1: Create completely clean handler
+                        $this->createCleanHandler();
 
-                        // Step 2: Aggressive cache clear
+                        // Step 2: Clear all caches
                         $this->aggressiveCacheClear();
 
-                        // Step 3: Remove Sentry package without running scripts
-                        $this->info("Removing {$package}...");
-                        shell_exec("composer remove {$package} --no-scripts 2>&1");
+                        // Step 3: Remove using line-by-line approach
+                        $this->removeSentryFromHandler();
 
-                        // Step 4: Run composer dump-autoload separately
+                        // Step 4: Clear caches again
+                        $this->aggressiveCacheClear();
+
+                        // Step 5: Remove package
+                        $this->info("Removing {$package}...");
+                        shell_exec("composer remove {$package} --no-scripts --no-plugins 2>&1");
+
+                        // Step 6: Dump autoload separately
                         shell_exec("composer dump-autoload --no-scripts 2>&1");
 
-                        // Step 5: Final aggressive cache clear
+                        // Step 7: Final cache clear
                         $this->aggressiveCacheClear();
 
                         $this->info("✅ Removed {$name} package safely.");
@@ -293,7 +369,7 @@ PHP;
                         $this->info("✅ Removed {$name} package.");
                     }
                 } else {
-                    $this->warn("⚠️  Skipped {$name} removal. Please remove manually to avoid conflicts.");
+                    $this->warn("⚠️  Skipped {$name} removal.");
                 }
             }
         }
