@@ -155,9 +155,8 @@ PHP;
         }
 
         $content = File::get($handlerPath);
-        $alreadyPatched = strpos($content, 'AllStak\\AllStakClient') !== false;
 
-        if (!$alreadyPatched) {
+        if (strpos($content, 'AllStak\\AllStakClient') === false) {
             $backup = $handlerPath . '.bak_' . time();
             File::copy($handlerPath, $backup);
             $this->info("Backup created: {$backup}");
@@ -192,6 +191,38 @@ PHP;
         }
     }
 
+    private function revertHandlerPatch()
+    {
+        $handlerPath = app_path('Exceptions/Handler.php');
+        if (!File::exists($handlerPath)) {
+            return;
+        }
+
+        $content = File::get($handlerPath);
+
+        $content = preg_replace('/use AllStak\\\\AllStakClient;/', '', $content);
+
+        $content = preg_replace(
+            '/\$this->reportable\(function\s*\(\\Throwable \$e\)\s*\{[^}]*app\(AllStakClient::class\)->captureException\(\$e\);[^}]*\}\);/m',
+            '',
+            $content
+        );
+
+        File::put($handlerPath, $content);
+        $this->info('✅ Reverted Exception Handler patch related to AllStak');
+    }
+
+    private function clearCachesAndAutoload()
+    {
+        $this->info('🔄 Clearing caches and regenerating autoload...');
+        exec('composer dump-autoload');
+        exec('php artisan config:clear');
+        exec('php artisan cache:clear');
+        exec('php artisan route:clear');
+        exec('php artisan view:clear');
+        $this->info('✅ Caches cleared and autoload regenerated.');
+    }
+
     private function checkAndRemoveCompetitors()
     {
         $composerJsonPath = base_path('composer.json');
@@ -209,6 +240,11 @@ PHP;
                 if ($this->confirm("Detected {$name} package. Remove it?")) {
                     exec("composer remove {$package}");
                     $this->info("✅ Removed {$name} package.");
+
+                    if ($name === 'Sentry') {
+                        $this->revertHandlerPatch();
+                        $this->clearCachesAndAutoload();
+                    }
                 } else {
                     $this->warn("⚠️ Please remove {$name} manually to avoid conflicts.");
                 }
