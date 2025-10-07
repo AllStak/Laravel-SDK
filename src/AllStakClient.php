@@ -4,6 +4,7 @@ namespace AllStak;
 
 use AllStak\Helpers\ClientHelper;
 use AllStak\Helpers\SecurityHelper;
+use AllStak\Tracing\Span;
 use AllStak\Tracing\SpanContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -448,65 +449,55 @@ class AllStakClient
     /**
      * Start a new span for distributed tracing
      */
-    public function startSpan(string $name, ?string $parentSpanId = null): string
+    public function startSpan(string $name, ?string $parentSpanId = null): Span
     {
-        $spanId = bin2hex(random_bytes(8));
         $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
 
-        $this->activeSpans[$spanId] = [
-            'span_id' => $spanId,
-            'trace_id' => $traceId,
-            'parent_span_id' => $parentSpanId,
-            'name' => $name,
-            'start_time' => microtime(true),
-            'attributes' => [],
-        ];
+        // Create and return a Span object
+        $span = new Span($name, $traceId, $parentSpanId);
 
-        return $spanId;
+        // Store it for later
+        $this->activeSpans[$span->id] = $span;
+
+        return $span;
     }
-
     /**
      * End a span and send to API
      */
-    public function endSpan(string $spanId, ?string $status = 'ok'): bool
+    public function endSpan(Span $span): bool
     {
-        if (!isset($this->activeSpans[$spanId])) {
-            Log::warning("Span $spanId not found");
-            return false;
-        }
-
-        $span = $this->activeSpans[$spanId];
-        $span['end_time'] = microtime(true);
-        $span['duration'] = ($span['end_time'] - $span['start_time']) * 1000; // ms
-        $span['status'] = $status;
+        $span->end(); // Call the Span's end method
 
         try {
             $payload = [
-                'trace_id' => $span['trace_id'],
-                'span_id' => $span['span_id'],
-                'parent_span_id' => $span['parent_span_id'],
-                'name' => $span['name'],
-                'start_time' => $span['start_time'],
-                'end_time' => $span['end_time'],
-                'duration' => $span['duration'],
-                'status' => $span['status'],
-                'attributes' => $span['attributes'],
+                'trace_id' => $span->traceId,
+                'span_id' => $span->id,
+                'parent_span_id' => $span->parentSpanId,
+                'name' => $span->name,
+                'start_time' => $span->startTime,
+                'end_time' => $span->endTime,
+                'duration' => ($span->endTime - $span->startTime) * 1000, // ms
+                'status' => $span->status ?? 'ok',
+                'attributes' => $span->attributes,
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
             ];
+
+            if ($span->error) {
+                $payload['error'] = $span->error;
+            }
 
             $this->httpClient->request('POST', self::API_URL . '/spans', [
                 'json' => $payload,
             ]);
 
-            unset($this->activeSpans[$spanId]);
+            unset($this->activeSpans[$span->id]);
             return true;
         } catch (\Exception $e) {
             Log::error('Failed to send span: ' . $e->getMessage());
             return false;
         }
     }
-
     /**
      * Add attributes to a span
      */
