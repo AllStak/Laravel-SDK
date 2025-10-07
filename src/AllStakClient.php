@@ -2,6 +2,8 @@
 
 namespace AllStak;
 
+use AllStak\Helpers\ClientHelper;
+use AllStak\Helpers\SecurityHelper;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Cache\RateLimiter;

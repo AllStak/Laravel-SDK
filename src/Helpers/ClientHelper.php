@@ -1,6 +1,6 @@
 <?php
 
-namespace AllStak\Tracing\Helpers;
+namespace AllStak\Helpers;
 
 use DateTimeInterface;
 use Throwable;
