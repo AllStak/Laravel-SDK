@@ -21,7 +21,6 @@ class AllStakClient
     private string $environment;
     private bool $sendIpAddress;
     private $httpClient;
-    private RateLimiter $rateLimiter;
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
     private string $serviceName;
