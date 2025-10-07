@@ -2,7 +2,6 @@
 
 namespace AllStak;
 
-use AllStak\Tracing\Console\Commands\InstallAllStakCommand;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 use AllStak\Tracing\DBSpanRecorder;
@@ -45,12 +44,5 @@ class AllStakServiceProvider extends ServiceProvider
         DB::listen(function ($query) use ($recorder) {
             $recorder->record($query);
         });
-
-        // 3. Register console commands
-        if ($this->app->runningInConsole()) {
-            $this->commands([
-                InstallAllStakCommand::class,
-            ]);
-        }
     }
 }

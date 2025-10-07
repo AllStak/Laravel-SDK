@@ -1,11 +1,11 @@
 <?php
-namespace AllStak\Tracing\Middleware;
+namespace AllStak\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
-use AllStak\Tracing\AllStakClient;
-use AllStak\Tracing\Tracing\SpanContext;
+use AllStak\AllStakClient;
+use AllStak\Tracing\SpanContext;
 
 class AllStakTracingMiddleware
 {

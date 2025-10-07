@@ -1,8 +1,8 @@
 <?php
 
-namespace AllStak\Tracing\Middleware;
+namespace AllStak\Middleware;
 
-use AllStak\Tracing\AllStakClient;
+use AllStak\AllStakClient;
 use AllStak\Tracing\SpanContext;
 use Closure;
 use Illuminate\Http\Request;
