@@ -1,9 +1,10 @@
 <?php
 
-namespace AllStak\Laravel\Tracing;
-use Illuminate\Database\Events\QueryExecuted;
+namespace AllStak\Tracing;
+
 use AllStak\AllStakClient;
 use AllStak\Tracing\SpanContext;
+use Illuminate\Database\Events\QueryExecuted;
 
 class DBSpanRecorder
 {

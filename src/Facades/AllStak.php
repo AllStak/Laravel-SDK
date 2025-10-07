@@ -1,6 +1,6 @@
 <?php
 
-namespace AllStak\Facades;
+namespace AllStak\Tracing\Facades;
 
 use Illuminate\Support\Facades\Facade;
 

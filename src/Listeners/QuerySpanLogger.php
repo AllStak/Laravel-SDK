@@ -1,8 +1,8 @@
 <?php
-namespace AllStak\Listeners;
+namespace AllStak\Tracing\Listeners;
 
 use Illuminate\Database\Events\QueryExecuted;
-use AllStak\AllStakClient;
+use AllStak\Tracing\AllStakClient;
 
 class QuerySpanLogger
 {

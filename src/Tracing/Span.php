@@ -1,7 +1,7 @@
 <?php
 
 
-namespace AllStak\Tracing;
+namespace AllStak\Tracing\Tracing;
 
 class Span
 {

@@ -2,7 +2,7 @@
 
 namespace AllStak;
 
-use AllStak\Console\Commands\InstallAllStakCommand;
+use AllStak\Tracing\Console\Commands\InstallAllStakCommand;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 use AllStak\Tracing\DBSpanRecorder;
@@ -37,8 +37,8 @@ class AllStakServiceProvider extends ServiceProvider
         ], 'allstak-config');
 
         // 1. HTTP request span (global middleware)
-        $this->app['router']->pushMiddlewareToGroup('web', \AllStak\Middleware\AllStakTracingMiddleware::class);
-        $this->app['router']->pushMiddlewareToGroup('api', \AllStak\Middleware\AllStakTracingMiddleware::class);
+        $this->app['router']->pushMiddlewareToGroup('web', \AllStak\Tracing\Middleware\AllStakTracingMiddleware::class);
+        $this->app['router']->pushMiddlewareToGroup('api', \AllStak\Tracing\Middleware\AllStakTracingMiddleware::class);
 
         // 2. DB query tracing
         $recorder = new DBSpanRecorder(app(AllStakClient::class));

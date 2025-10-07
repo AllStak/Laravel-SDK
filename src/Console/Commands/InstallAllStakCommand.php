@@ -1,6 +1,6 @@
 <?php
 
-namespace AllStak\Console\Commands;
+namespace AllStak\Tracing\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;

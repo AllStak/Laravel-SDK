@@ -1,6 +1,6 @@
 <?php
 
-namespace AllStak\Helpers;
+namespace AllStak\Tracing\Helpers;
 
 class SecurityHelper
 {

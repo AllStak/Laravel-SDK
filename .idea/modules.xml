@@ -4,6 +4,7 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/AllStak-Laravel.iml" filepath="$PROJECT_DIR$/.idea/AllStak-Laravel.iml" />
       <module fileurl="file://$PROJECT_DIR$/../test-allstak-laravel/test-allstak-laravel.iml" filepath="$PROJECT_DIR$/../test-allstak-laravel/test-allstak-laravel.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../test-laravel-sdk/test-laravel-sdk.iml" filepath="$PROJECT_DIR$/../test-laravel-sdk/test-laravel-sdk.iml" />
     </modules>
   </component>
 </project>
