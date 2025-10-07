@@ -1,25 +1,34 @@
 <?php
+
 namespace AllStak\Middleware;
 
-use Closure;
-use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\Response;
 use AllStak\AllStakClient;
 use AllStak\Tracing\SpanContext;
+use Closure;
+use Illuminate\Http\Request;
 
 class AllStakTracingMiddleware
 {
-    public function handle(Request $request, Closure $next): Response
-    {
-        $client = app(AllStakClient::class);
-        // Generate unique trace and span IDs
-        $traceId = bin2hex(random_bytes(16));
-        $spanId = bin2hex(random_bytes(8));
-        SpanContext::setTraceId($traceId);
-        SpanContext::setParentSpanId($spanId);
+    private AllStakClient $client;
 
-        // Start the root span for the HTTP request
-        $span = $client->startSpan('http.request', $traceId, null, $spanId);
+    public function __construct(AllStakClient $client)
+    {
+        $this->client = $client;
+    }
+
+    public function handle(Request $request, Closure $next)
+    {
+        // Generate or get trace ID
+        $traceId = $request->header('X-Trace-ID') ?? $this->client->generateTraceId();
+        SpanContext::setTraceId($traceId);
+
+        // Add trace ID to request headers
+        $request->headers->set('X-Trace-ID', $traceId);
+
+        // FIXED: Use startSpan correctly - it only accepts name and optional parentSpanId
+        $span = $this->client->startSpan('http.request', null);
+
+        // Add attributes to the span
         $span->setAttribute('method', $request->method());
         $span->setAttribute('url', $request->fullUrl());
         $span->setAttribute('ip', $request->ip());
@@ -27,18 +36,26 @@ class AllStakTracingMiddleware
 
         try {
             $response = $next($request);
+
             $span->setAttribute('status_code', $response->getStatusCode());
             $span->setStatus('ok');
+
+            // Add trace ID to response
+            if (method_exists($response, 'header')) {
+                $response->header('X-Trace-ID', $traceId);
+            }
+
             return $response;
         } catch (\Throwable $e) {
             $span->setStatus('error');
             $span->recordException($e);
-            $client->captureException($e);
+            $this->client->captureException($e, $request, $traceId);
             throw $e;
         } finally {
+            // FIXED: Use endSpan to send the Span object
             $span->end();
-            $client->sendSpan($span);
-            SpanContext::clear(); // Clean up after the request
+            $this->client->endSpan($span);
+            SpanContext::clear();
         }
     }
 }
