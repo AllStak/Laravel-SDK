@@ -16,7 +16,7 @@ class AllStakClient
     private const API_URL = 'http://localhost:8080/api/sdk/v2';
     private const MAX_ATTEMPTS = 100;
     private const SDK_VERSION = '2.0.0';
-
+    private ?RateLimiter $rateLimiter = null;
     private string $apiKey;
     private string $environment;
     private bool $sendIpAddress;
@@ -36,6 +36,7 @@ class AllStakClient
         $this->environment = $environment;
         $this->sendIpAddress = $sendIpAddress;
         $this->serviceName = $serviceName;
+
         $this->httpClient = HttpClient::create([
             'timeout' => 5,
             'headers' => [
@@ -43,9 +44,17 @@ class AllStakClient
                 'Accept' => 'application/json',
             ],
         ]);
-        $this->rateLimiter = app(RateLimiter::class);
+
         $this->securityHelper = new SecurityHelper();
         $this->clientHelper = new ClientHelper($this->securityHelper);
+    }
+
+    private function getRateLimiter(): RateLimiter
+    {
+        if ($this->rateLimiter === null) {
+            $this->rateLimiter = app(RateLimiter::class);
+        }
+        return $this->rateLimiter;
     }
 
     /**
@@ -452,10 +461,15 @@ class AllStakClient
 
     private function shouldThrottle(): bool
     {
-        return !$this->rateLimiter->attempt(
-            'allstak-api',
-            self::MAX_ATTEMPTS,
-            fn() => true
-        );
+        try {
+            return !$this->getRateLimiter()->attempt(
+                'allstak-api',
+                self::MAX_ATTEMPTS,
+                fn() => true
+            );
+        } catch (\Exception $e) {
+            Log::warning('AllStak rate limiter failed: ' . $e->getMessage());
+            return false;
+        }
     }
 }

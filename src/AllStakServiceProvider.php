@@ -30,19 +30,25 @@ class AllStakServiceProvider extends ServiceProvider
 
     public function boot()
     {
-        // Publish the config file
         $this->publishes([
             __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
 
-        // 1. HTTP request span (global middleware)
-        $this->app['router']->pushMiddlewareToGroup('web', \AllStak\Tracing\Middleware\AllStakTracingMiddleware::class);
-        $this->app['router']->pushMiddlewareToGroup('api', \AllStak\Tracing\Middleware\AllStakTracingMiddleware::class);
+        try {
+            // 1. HTTP request span (global middleware)
+            $this->app['router']->pushMiddlewareToGroup('web', \AllStak\Middleware\AllStakTracingMiddleware::class);
+            $this->app['router']->pushMiddlewareToGroup('api', \AllStak\Middleware\AllStakTracingMiddleware::class);
 
-        // 2. DB query tracing
-        $recorder = new DBSpanRecorder(app(AllStakClient::class));
-        DB::listen(function ($query) use ($recorder) {
-            $recorder->record($query);
-        });
+            // 2. DB query tracing
+            if ($this->app->bound(AllStakClient::class)) {
+                $recorder = new DBSpanRecorder(app(AllStakClient::class));
+                DB::listen(function ($query) use ($recorder) {
+                    $recorder->record($query);
+                });
+            }
+        } catch (\Exception $e) {
+            Log::error('AllStak initialization failed: ' . $e->getMessage());
+        }
     }
+
 }
