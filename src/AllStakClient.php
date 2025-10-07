@@ -508,6 +508,47 @@ class AllStakClient
         }
     }
 
+    // Add this method to AllStakClient.php class
+
+    /**
+     * Add a span directly (for backward compatibility with QuerySpanLogger)
+     */
+    public function addSpan(string $name, float $startTime, float $endTime, array $attributes = []): bool
+    {
+        if ($this->shouldThrottle()) {
+            Log::warning('allstak rate limit exceeded');
+            return false;
+        }
+
+        try {
+            $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+
+            $payload = [
+                'trace_id' => $traceId,
+                'span_id' => bin2hex(random_bytes(8)),
+                'parent_span_id' => null,
+                'name' => $name,
+                'start_time' => $startTime,
+                'end_time' => $endTime,
+                'duration' => ($endTime - $startTime) * 1000, // Convert to milliseconds
+                'status' => 'ok',
+                'attributes' => $attributes,
+                'service_name' => $this->serviceName,
+                'environment' => $this->environment,
+            ];
+
+            $this->httpClient->request('POST', self::API_URL . '/spans', [
+                'json' => $payload,
+            ]);
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Failed to send span to allstak: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+
 
     private function getResponseBody($response): ?string
     {
