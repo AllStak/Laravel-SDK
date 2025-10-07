@@ -1,35 +1,35 @@
 <?php
 
-namespace AllStak\Tracing;
+namespace AllStak;
 
 class SpanContext
 {
-    protected static ?string $currentTraceId = null;
-    protected static ?string $currentParentSpanId = null;
+    private static ?string $traceId = null;
+    private static ?string $parentSpanId = null;
 
     public static function setTraceId(string $traceId): void
     {
-        self::$currentTraceId = $traceId;
+        self::$traceId = $traceId;
     }
 
     public static function getTraceId(): ?string
     {
-        return self::$currentTraceId;
+        return self::$traceId;
     }
 
-    public static function setParentSpanId(string $spanId): void
+    public static function setParentSpanId(string $parentSpanId): void
     {
-        self::$currentParentSpanId = $spanId;
+        self::$parentSpanId = $parentSpanId;
     }
 
     public static function getParentSpanId(): ?string
     {
-        return self::$currentParentSpanId;
+        return self::$parentSpanId;
     }
 
     public static function clear(): void
     {
-        self::$currentTraceId = null;
-        self::$currentParentSpanId = null;
+        self::$traceId = null;
+        self::$parentSpanId = null;
     }
 }

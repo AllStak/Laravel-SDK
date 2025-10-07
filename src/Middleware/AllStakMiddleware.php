@@ -2,72 +2,54 @@
 
 namespace AllStak\Middleware;
 
+use AllStak\AllStakClient;
+use AllStak\SpanContext;
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
-use AllStak\AllStakClient;
 
 class AllStakMiddleware
 {
-    protected $allstack;
+    private AllStakClient $client;
 
-    protected $excludePaths = [
-        '_debugbar*',
-        '_ignition*',
-        'horizon*',
-        'nova*',
-        'telescope*',
-        'health*',
-        'api/health*',
-    ];
-
-    protected $excludeExtensions = [
-        'css', 'js', 'ico', 'png', 'jpg', 'jpeg', 'gif', 'svg',
-        'woff', 'woff2', 'ttf', 'eot', 'map', 'txt'
-    ];
-
-    public function __construct(AllStakClient $allstack)
+    public function __construct(AllStakClient $client)
     {
-        $this->allstack = $allstack;
+        $this->client = $client;
     }
 
-    public function handle($request, Closure $next)
+    public function handle(Request $request, Closure $next)
     {
-        if ($this->shouldSkip($request)) {
-            return $next($request);
-        }
+        // Generate or get trace ID
+        $traceId = $request->header('X-Trace-ID') ?? $this->client->generateTraceId();
+        SpanContext::setTraceId($traceId);
+
+        // Add trace ID to response headers
+        $request->headers->set('X-Trace-ID', $traceId);
+
+        $startTime = microtime(true);
 
         try {
             $response = $next($request);
-            $this->allstack->captureRequest($request);
-            return $response;
-        } catch (\Throwable $e) {
-            // Let the exception bubble up.
-            throw $e;
-        }
-    }
 
-    protected function shouldSkip($request)
-    {
-        // Skip preflight (OPTIONS) requests.
-        if (method_exists($request, 'isMethod') && $request->isMethod('OPTIONS')) {
-            return true;
-        }
+            $duration = microtime(true) - $startTime;
 
-        // Skip excluded paths.
-        foreach ($this->excludePaths as $path) {
-            if (method_exists($request, 'is') && $request->is($path)) {
-                return false;
+            // Log successful request
+            $this->client->captureRequest($request, $response, $duration, $traceId);
+
+            // Add trace ID to response
+            if (method_exists($response, 'header')) {
+                $response->header('X-Trace-ID', $traceId);
             }
-        }
 
-        // Skip static assets.
-        $path = $request->getPathInfo();
-        $extension = pathinfo($path, PATHINFO_EXTENSION);
-        if (in_array(strtolower($extension), $this->excludeExtensions)) {
-            return true;
-        }
+            return $response;
+        } catch (\Throwable $exception) {
+            $duration = microtime(true) - $startTime;
 
-        return false;
+            // Log error with same trace ID
+            $this->client->captureException($exception, $request, $traceId);
+
+            throw $exception;
+        } finally {
+            SpanContext::clear();
+        }
     }
 }
