@@ -22,6 +22,7 @@ class AllStakClient
     private const API_URL = 'http://localhost:8080/api/sdk/v2';
     private const MAX_ATTEMPTS = 100;
     private const DECAY_SECONDS = 60; // 1 minute window
+    const SDK_VERSION = "2.0.0";
 
     private string $apiKey;
     private string $environment;
