@@ -2,10 +2,15 @@
 
 namespace AllStak;
 
+use AllStak\Helpers\ClientHelper;
+use AllStak\Helpers\SecurityHelper;
+use AllStak\Tracing\Span;
+use AllStak\Tracing\SpanContext;
 use AllStak\Transport\AsyncHttpTransport;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\app;
+use Illuminate\Support\Facades\RateLimiter;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
