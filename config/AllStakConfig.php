@@ -11,6 +11,6 @@ return [
     'timeout' => env('ALLSTAK_TIMEOUT', 5), // Request timeout
     'max_payload_size' => env('ALLSTAK_MAX_PAYLOAD_SIZE', 10000), // Bytes
     'excluded_paths' => env('ALLSTAK_EXCLUDED_PATHS', '/health,/metrics'), // Skip certain routes
-    'use_compression' => env('ALLSTAK_USE_COMPRESSION', true),
+    'use_compression' => env('ALLSTAK_USE_COMPRESSION', false),
     'compression_level' => env('ALLSTAK_COMPRESSION_LEVEL', 6),
 ];
