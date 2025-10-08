@@ -8,31 +8,32 @@ use AllStak\Tracing\Span;
 use AllStak\Tracing\SpanContext;
 use AllStak\Transport\AsyncHttpTransport;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\app;
-use Illuminate\Support\Facades\RateLimiter;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Throwable;
+use Illuminate\Contracts\Cache\Repository;
 
 class AllStakClient
 {
     private const API_URL = 'http://localhost:8080/api/sdk/v2';
     private const MAX_ATTEMPTS = 100;
-    private const SDK_VERSION = '2.0.0';
+    private const DECAY_SECONDS = 60; // 1 minute window
 
-    private ?RateLimiter $rateLimiter = null;
     private string $apiKey;
     private string $environment;
     private bool $sendIpAddress;
-    private ?HttpClientInterface $httpClient = null; // Keep for fallback, but use transport primarily
+    private ?HttpClientInterface $httpClient = null;
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
     private string $serviceName;
     private array $activeSpans = [];
     private ?AsyncHttpTransport $transport = null;
-    private bool $enabled = true; // Enabled by default, set in constructor
+    private bool $enabled = true;
+    private string $rateLimitKey;
 
     public function __construct(
         string $apiKey,
@@ -44,6 +45,7 @@ class AllStakClient
         $this->environment = $environment;
         $this->sendIpAddress = $sendIpAddress;
         $this->serviceName = $serviceName;
+        $this->rateLimitKey = 'allstak:' . md5($apiKey); // Unique per API key
 
         // Validate API key and enable SDK
         if (empty($apiKey) || strlen($apiKey) < 10) {
@@ -82,12 +84,30 @@ class AllStakClient
         return !$this->shouldThrottle();
     }
 
-    private function getRateLimiter(): RateLimiter
+    /**
+     * Simple cache-based rate limiting (replaces broken RateLimiter facade usage)
+     */
+    private function shouldThrottle(): bool
     {
-        if ($this->rateLimiter === null) {
-            $this->rateLimiter = app(RateLimiter::class);
+        try {
+            $attempts = Cache::get($this->rateLimitKey, 0);
+
+            if ($attempts >= self::MAX_ATTEMPTS) {
+                Log::debug('AllStak rate limit exceeded', ['attempts' => $attempts]);
+                return true;
+            }
+
+            // Increment attempts
+            Cache::put($this->rateLimitKey, $attempts + 1, self::DECAY_SECONDS);
+
+            Log::debug('AllStak rate limit check', ['attempts' => $attempts + 1]);
+            return false;
+        } catch (\Exception $e) {
+            Log::warning('AllStak rate limiting failed, proceeding without limit', [
+                'error' => $e->getMessage()
+            ]);
+            return false; // Fail open to avoid blocking
         }
-        return $this->rateLimiter;
     }
 
     /**
@@ -505,7 +525,7 @@ class AllStakClient
         }
     }
 
-    // Helper methods (unchanged, but added SDK version where relevant)
+    // Helper methods (unchanged)
 
     private function mapErrorType(string $category): string
     {
@@ -630,20 +650,6 @@ class AllStakClient
             return strlen($response->getContent());
         }
         return null;
-    }
-
-    private function shouldThrottle(): bool
-    {
-        try {
-            return !$this->getRateLimiter()->attempt(
-                'allstak-api',
-                self::MAX_ATTEMPTS,
-                fn() => true
-            );
-        } catch (\Exception $e) {
-            Log::warning('AllStak rate limiter failed: ' . $e->getMessage());
-            return false;
-        }
     }
 
     /**
