@@ -141,7 +141,11 @@ class AllStakClient
                 $exception->getLine(),
                 5
             );
-            $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);
+            $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);  // Likely array
+
+            // FIXED: json_encode array fields that DTO expects as String (e.g., code_context, tags if nested)
+            $maskedCodeContextJson = json_encode($maskedCodeContext);  // Now a JSON string
+            $tagsJson = json_encode($this->extractTags($exception));  // Ensure tags is flat array; encode if needed
 
             // Main error_logs payload
             $payload = [
@@ -153,7 +157,7 @@ class AllStakClient
                 'error_class' => get_class($exception),
                 'severity' => $errorSeverity,
                 'status' => 'new',
-                'stack_trace' => $exception->getTraceAsString(),
+                'stack_trace' => $this->sanitizeString($exception->getTraceAsString()),  // From earlier sanitization
                 'source' => 'SDK',
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
@@ -164,55 +168,62 @@ class AllStakClient
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
                 'laravel_version' => app()->version(),
-                'tags' => $this->extractTags($exception),
+                'tags' => $tagsJson,  // FIXED: Encode if array (DTO: List<String> will parse JSON array)
 
-                // Additional context
+                // Additional context - FIXED: code_context as JSON string
                 'additional_data' => [
-                    'file' => $exception->getFile(),
+                    'file' => $this->sanitizeString($exception->getFile()),
                     'line' => $exception->getLine(),
                     'hostname' => gethostname(),
-                    'code_context' => $maskedCodeContext,
+                    'code_context' => $maskedCodeContextJson,  // Now string: "[\"masked line1\", ...]"
                     'memory_usage' => $this->clientHelper->getMemoryUsage(),
                 ],
 
-                // HTTP error details (if applicable)
+                // HTTP error details (already has json_encode for headers/body - good)
                 'http_error' => $this->isHttpException($exception) ? [
                     'http_method' => $request->method(),
                     'http_url' => $this->securityHelper->sanitizeUrl($request->fullUrl()),
                     'http_path' => $request->path(),
                     'http_status_code' => $this->getHttpStatusCode($exception),
-                    'http_duration' => null, // Should be set from middleware
+                    'http_duration' => null,
                     'user_agent' => $request->userAgent() ?? 'unknown',
                     'referer' => $request->header('referer'),
                     'request_headers' => json_encode($this->clientHelper->transformHeaders($request->headers->all())),
                     'request_body' => json_encode($this->clientHelper->transformRequestBody($request->all())),
-                    'response_headers' => null,
-                    'response_body' => null,
+                    'response_headers' => null,  // If array later, json_encode
+                    'response_body' => null,  // If content, truncate + json_encode if object
                     'is_client_error' => $this->isClientError($exception),
                     'is_server_error' => $this->isServerError($exception),
                 ] : null,
 
-                // Database error details (if applicable)
+                // Database error (strings only - good)
                 'database_error' => $this->isDatabaseException($exception) ? [
-                    'query_text' => $this->extractQueryFromException($exception),
+                    'query_text' => $this->sanitizeString($this->extractQueryFromException($exception)),
                     'database_name' => config('database.connections.' . config('database.default') . '.database'),
                     'constraint_violated' => $this->extractConstraintViolation($exception),
                 ] : null,
 
-                // Application error details (if applicable)
+                // Application error (strings/ints - good)
                 'application_error' => [
-                    'file_path' => $exception->getFile(),
+                    'file_path' => $this->sanitizeString($exception->getFile()),
                     'line_number' => $exception->getLine(),
-                    'function_name' => $this->extractFunctionName($exception),
-                    'class_name' => $this->extractClassName($exception),
+                    'function_name' => $this->sanitizeString($this->extractFunctionName($exception)),
+                    'class_name' => $this->sanitizeString($this->extractClassName($exception)),
                     'exception_type' => get_class($exception),
                     'is_handled' => true,
                 ],
             ];
 
-            Log::debug('AllStak Exception Payload', ['payload' => $payload]);
+            // FIXED: Sanitize/encode full payload before sending
+            $payload = $this->sanitizePayload($payload);  // New helper: recursive sanitize + encode arrays as needed
 
-            // Use async transport (non-blocking)
+            Log::debug('AllStak Exception Payload prepared for send', [
+                'trace_id' => $traceId,
+                'error_message_preview' => substr($payload['error_message'], 0, 100),
+                'additional_data_keys' => array_keys($payload['additional_data'] ?? []),
+                'tags_count' => is_string($payload['tags']) ? count(json_decode($payload['tags'], true)) : count($payload['tags'] ?? [])
+            ]);  // Log previews only (security + size)
+
             $this->transport->send(self::API_URL . '/errors', $payload);
 
             return true;
@@ -652,6 +663,33 @@ class AllStakClient
         }
         return null;
     }
+
+    /**
+     * Sanitize payload: Encode arrays/objects to JSON strings for String DTO fields;
+     * Apply string sanitization; Limit sizes
+     */
+    private function sanitizePayload(array $payload): array
+    {
+        foreach ($payload as $key => $value) {
+            if (is_array($value)) {
+                // Nested objects (e.g., additional_data) - recurse
+                $payload[$key] = $this->sanitizePayload($value);
+            } elseif (is_object($value)) {
+                // Convert objects to arrays first
+                $payload[$key] = $this->sanitizePayload((array) $value);
+            } elseif (is_array($value) && in_array($key, ['code_context', 'tags', 'request_headers', 'request_body'])) {
+                // FIXED: Specific fields - encode arrays to JSON strings
+                $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+                $payload[$key] = substr($encoded, 0, 10000);  // Truncate
+            } elseif (is_string($value)) {
+                $payload[$key] = $this->sanitizeString($value);  // From earlier: removes control chars
+            } elseif (is_numeric($value) && $key === 'memory_usage') {
+                $payload[$key] = min($value, 1073741824);  // Cap at 1GB
+            }
+        }
+        return $payload;
+    }
+
 
     /**
      * Destructor ensures pending requests are flushed
