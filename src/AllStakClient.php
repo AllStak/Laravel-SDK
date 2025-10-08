@@ -2,31 +2,32 @@
 
 namespace AllStak;
 
-use AllStak\Helpers\ClientHelper;
-use AllStak\Helpers\SecurityHelper;
-use AllStak\Tracing\Span;
-use AllStak\Tracing\SpanContext;
+use AllStak\Transport\AsyncHttpTransport;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Cache\RateLimiter;
+use Illuminate\Support\Facades\app;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Throwable;
 
 class AllStakClient
 {
-//    private const API_URL = 'https://api.allstak.com/v1';
     private const API_URL = 'http://localhost:8080/api/sdk/v2';
     private const MAX_ATTEMPTS = 100;
     private const SDK_VERSION = '2.0.0';
+
     private ?RateLimiter $rateLimiter = null;
     private string $apiKey;
     private string $environment;
     private bool $sendIpAddress;
-    private $httpClient;
+    private ?HttpClientInterface $httpClient = null; // Keep for fallback, but use transport primarily
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
     private string $serviceName;
     private array $activeSpans = [];
+    private ?AsyncHttpTransport $transport = null;
+    private bool $enabled = true; // Enabled by default, set in constructor
 
     public function __construct(
         string $apiKey,
@@ -39,16 +40,41 @@ class AllStakClient
         $this->sendIpAddress = $sendIpAddress;
         $this->serviceName = $serviceName;
 
+        // Validate API key and enable SDK
+        if (empty($apiKey) || strlen($apiKey) < 10) {
+            Log::warning('AllStak SDK disabled: Invalid or empty API key');
+            $this->enabled = false;
+            return;
+        }
+
+        // Create HTTP client for transport
         $this->httpClient = HttpClient::create([
             'timeout' => 5,
-            'headers' => [
-                'x-api-key' => $this->apiKey,
-                'Accept' => 'application/json',
-            ],
+            'max_duration' => 10,
         ]);
+
+        // Initialize async transport (only if enabled)
+        if ($this->enabled) {
+            $this->transport = new AsyncHttpTransport(
+                $this->httpClient,
+                $this->apiKey,
+                config('allstak.use_compression', true)
+            );
+        }
 
         $this->securityHelper = new SecurityHelper();
         $this->clientHelper = new ClientHelper($this->securityHelper);
+    }
+
+    /**
+     * Check if SDK is enabled and rate limit allows
+     */
+    private function isAllowed(): bool
+    {
+        if (!$this->enabled) {
+            return false;
+        }
+        return !$this->shouldThrottle();
     }
 
     private function getRateLimiter(): RateLimiter
@@ -72,8 +98,8 @@ class AllStakClient
      */
     public function captureException(Throwable $exception, ?Request $request = null, ?string $traceId = null): bool
     {
-        if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled');
             return false;
         }
 
@@ -108,6 +134,10 @@ class AllStakClient
                 'ip' => $this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip()),
                 'user_id' => $request->user()?->id ?? null,
                 'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
                 'tags' => $this->extractTags($exception),
 
                 // Additional context
@@ -154,15 +184,14 @@ class AllStakClient
                 ],
             ];
 
-            Log::debug('allstak Exception Payload', ['payload' => $payload]);
+            Log::debug('AllStak Exception Payload', ['payload' => $payload]);
 
-            $this->httpClient->request('POST', self::API_URL . '/errors', [
-                'json' => $payload,
-            ]);
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/errors', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send error to allstak: ' . $e->getMessage());
+            Log::error('Failed to send error to AllStak: ' . $e->getMessage());
             return false;
         }
     }
@@ -172,12 +201,12 @@ class AllStakClient
      */
     public function captureRequest(
         Request $request,
-        $response,
+                $response,
         float $duration,
         ?string $traceId = null
     ): bool {
-        if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled');
             return false;
         }
 
@@ -207,17 +236,21 @@ class AllStakClient
                 'session_id' => $request->session()?->getId(),
                 'is_success' => $statusCode >= 200 && $statusCode < 400,
                 'is_cached' => $request->headers->has('X-Cache-Hit'),
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
             ];
 
-            Log::debug('allstak HTTP Request Payload', ['payload' => $payload]);
+            Log::debug('AllStak HTTP Request Payload', ['payload' => $payload]);
 
-            $this->httpClient->request('POST', self::API_URL . '/http-logs', [
-                'json' => $payload,
-            ]);
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/http-logs', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send request to allstak: ' . $e->getMessage());
+            Log::error('Failed to send request to AllStak: ' . $e->getMessage());
             return false;
         }
     }
@@ -233,8 +266,8 @@ class AllStakClient
         ?string $traceId = null,
         bool $success = true
     ): bool {
-        if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled');
             return false;
         }
 
@@ -262,23 +295,27 @@ class AllStakClient
                 'is_slow' => $duration > 1000, // Slow if > 1 second
                 'is_cached' => false,
                 'cache_hit' => false,
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
             ];
 
-            Log::debug('allstak DB Query Payload', ['payload' => $payload]);
+            Log::debug('AllStak DB Query Payload', ['payload' => $payload]);
 
-            $this->httpClient->request('POST', self::API_URL . '/db-queries', [
-                'json' => $payload,
-            ]);
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/db-queries', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send DB query to allstak: ' . $e->getMessage());
+            Log::error('Failed to send DB query to AllStak: ' . $e->getMessage());
             return false;
         }
     }
 
     /**
-     * NEW: Capture framework logs to framework_logs table
+     * Capture framework logs to framework_logs table
      */
     public function captureFrameworkLog(
         string $level,
@@ -286,8 +323,8 @@ class AllStakClient
         array $context = [],
         ?string $traceId = null
     ): bool {
-        if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled');
             return false;
         }
 
@@ -319,22 +356,151 @@ class AllStakClient
                 'request_id' => request()->header('X-Request-ID'),
                 'process_id' => getmypid(),
                 'hostname' => gethostname(),
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
             ];
 
-            Log::debug('allstak Framework Log Payload', ['payload' => $payload]);
+            Log::debug('AllStak Framework Log Payload', ['payload' => $payload]);
 
-            $this->httpClient->request('POST', self::API_URL . '/framework-logs', [
-                'json' => $payload,
-            ]);
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/framework-logs', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send framework log to allstak: ' . $e->getMessage());
+            Log::error('Failed to send framework log to AllStak: ' . $e->getMessage());
             return false;
         }
     }
 
-    // Helper methods
+    /**
+     * Start a new span for distributed tracing
+     */
+    public function startSpan(string $name, ?string $parentSpanId = null): Span
+    {
+        $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+
+        // Create and return a Span object
+        $span = new Span($name, $traceId, $parentSpanId);
+
+        // Store it for later
+        $this->activeSpans[$span->id] = $span;
+
+        return $span;
+    }
+
+    /**
+     * End a span and send to API
+     */
+    public function endSpan(Span $span): bool
+    {
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled for span');
+            return false;
+        }
+
+        $span->end(); // Call the Span's end method
+
+        try {
+            $payload = [
+                'trace_id' => $span->traceId,
+                'span_id' => $span->id,
+                'parent_span_id' => $span->parentSpanId,
+                'name' => $span->name,
+                'start_time' => $span->startTime,
+                'end_time' => $span->endTime,
+                'duration' => ($span->endTime - $span->startTime) * 1000, // ms
+                'status' => $span->status ?? 'ok',
+                'attributes' => $span->attributes,
+                'service_name' => $this->serviceName,
+                'environment' => $this->environment,
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
+            ];
+
+            if ($span->error) {
+                $payload['error'] = $span->error;
+            }
+
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/spans', $payload);
+
+            unset($this->activeSpans[$span->id]);
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Failed to send span: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Add attributes to a span
+     */
+    public function addSpanAttribute(string $spanId, string $key, $value): void
+    {
+        if (isset($this->activeSpans[$spanId])) {
+            $this->activeSpans[$spanId]->attributes[$key] = $value;
+        }
+    }
+
+    /**
+     * Add a span directly (for backward compatibility with QuerySpanLogger)
+     */
+    public function addSpan(string $name, float $startTime, float $endTime, array $attributes = []): bool
+    {
+        if (!$this->isAllowed()) {
+            Log::warning('AllStak rate limit exceeded or SDK disabled for span');
+            return false;
+        }
+
+        try {
+            $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+
+            $payload = [
+                'trace_id' => $traceId,
+                'span_id' => bin2hex(random_bytes(8)),
+                'parent_span_id' => null,
+                'name' => $name,
+                'start_time' => $startTime,
+                'end_time' => $endTime,
+                'duration' => ($endTime - $startTime) * 1000, // Convert to milliseconds
+                'status' => 'ok',
+                'attributes' => $attributes,
+                'service_name' => $this->serviceName,
+                'environment' => $this->environment,
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
+            ];
+
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/spans', $payload);
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Failed to send span to AllStak: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Manually flush pending events (useful for CLI scripts)
+     */
+    public function flush(int $timeout = 2): void
+    {
+        if ($this->enabled && $this->transport) {
+            $this->transport->flush($timeout);
+        }
+    }
+
+    // Helper methods (unchanged, but added SDK version where relevant)
 
     private function mapErrorType(string $category): string
     {
@@ -393,7 +559,7 @@ class AllStakClient
     private function isDatabaseException(Throwable $exception): bool
     {
         return $exception instanceof \PDOException ||
-               $exception instanceof \Illuminate\Database\QueryException;
+            $exception instanceof \Illuminate\Database\QueryException;
     }
 
     private function extractQueryFromException(Throwable $exception): ?string
@@ -444,112 +610,6 @@ class AllStakClient
         return null;
     }
 
-    // Add these properties at the top of the class
-
-    /**
-     * Start a new span for distributed tracing
-     */
-    public function startSpan(string $name, ?string $parentSpanId = null): Span
-    {
-        $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
-
-        // Create and return a Span object
-        $span = new Span($name, $traceId, $parentSpanId);
-
-        // Store it for later
-        $this->activeSpans[$span->id] = $span;
-
-        return $span;
-    }
-    /**
-     * End a span and send to API
-     */
-    public function endSpan(Span $span): bool
-    {
-        $span->end(); // Call the Span's end method
-
-        try {
-            $payload = [
-                'trace_id' => $span->traceId,
-                'span_id' => $span->id,
-                'parent_span_id' => $span->parentSpanId,
-                'name' => $span->name,
-                'start_time' => $span->startTime,
-                'end_time' => $span->endTime,
-                'duration' => ($span->endTime - $span->startTime) * 1000, // ms
-                'status' => $span->status ?? 'ok',
-                'attributes' => $span->attributes,
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-            ];
-
-            if ($span->error) {
-                $payload['error'] = $span->error;
-            }
-
-            $this->httpClient->request('POST', self::API_URL . '/spans', [
-                'json' => $payload,
-            ]);
-
-            unset($this->activeSpans[$span->id]);
-            return true;
-        } catch (\Exception $e) {
-            Log::error('Failed to send span: ' . $e->getMessage());
-            return false;
-        }
-    }
-    /**
-     * Add attributes to a span
-     */
-    public function addSpanAttribute(string $spanId, string $key, $value): void
-    {
-        if (isset($this->activeSpans[$spanId])) {
-            $this->activeSpans[$spanId]['attributes'][$key] = $value;
-        }
-    }
-
-    // Add this method to AllStakClient.php class
-
-    /**
-     * Add a span directly (for backward compatibility with QuerySpanLogger)
-     */
-    public function addSpan(string $name, float $startTime, float $endTime, array $attributes = []): bool
-    {
-        if ($this->shouldThrottle()) {
-            Log::warning('allstak rate limit exceeded');
-            return false;
-        }
-
-        try {
-            $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
-
-            $payload = [
-                'trace_id' => $traceId,
-                'span_id' => bin2hex(random_bytes(8)),
-                'parent_span_id' => null,
-                'name' => $name,
-                'start_time' => $startTime,
-                'end_time' => $endTime,
-                'duration' => ($endTime - $startTime) * 1000, // Convert to milliseconds
-                'status' => 'ok',
-                'attributes' => $attributes,
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-            ];
-
-            $this->httpClient->request('POST', self::API_URL . '/spans', [
-                'json' => $payload,
-            ]);
-
-            return true;
-        } catch (\Exception $e) {
-            Log::error('Failed to send span to allstak: ' . $e->getMessage());
-            return false;
-        }
-    }
-
-
-
     private function getResponseBody($response): ?string
     {
         if (method_exists($response, 'getContent')) {
@@ -579,5 +639,13 @@ class AllStakClient
             Log::warning('AllStak rate limiter failed: ' . $e->getMessage());
             return false;
         }
+    }
+
+    /**
+     * Destructor ensures pending requests are flushed
+     */
+    public function __destruct()
+    {
+        $this->flush();
     }
 }
