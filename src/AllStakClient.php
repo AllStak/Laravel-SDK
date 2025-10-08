@@ -690,6 +690,32 @@ class AllStakClient
         return $payload;
     }
 
+    /**
+     * Sanitize string for JSON: Remove/escape control chars, ensure UTF-8, trim and limit length.
+     * Prevents JSON parse errors (e.g., illegal CTRL-CHAR) and payload bloat.
+     *
+     * @param ?string $input The input string (nullable).
+     * @return string Sanitized string (empty if null).
+     */
+    private function sanitizeString(?string $input): string
+    {
+        if ($input === null) {
+            return '';
+        }
+
+        // Remove control chars (0-31, 127) except allowed whitespace (\t=9, \n=10, \r=13)
+        $input = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $input);
+
+        // Ensure UTF-8 encoding (fix any encoding issues from sources like DB/files)
+        $input = mb_convert_encoding($input, 'UTF-8', 'UTF-8');
+
+        // Trim whitespace and limit length to prevent huge payloads (e.g., long stack traces)
+        $input = trim(substr($input, 0, 10000)); // Max 10KB per field; adjust if needed
+
+        return $input;
+    }
+
+
 
     /**
      * Destructor ensures pending requests are flushed
