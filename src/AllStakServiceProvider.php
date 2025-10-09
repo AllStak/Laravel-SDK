@@ -2,82 +2,88 @@
 
 namespace AllStak;
 
-use Illuminate\Support\ServiceProvider;
 use AllStak\AllStakClient;
-use AllStak\Helpers\SecurityHelper;  // Adjust namespace if different (e.g., from SecurityHelper.php)
-use AllStak\Helpers\ClientHelper;   // If used elsewhere; optional
-use AllStak\Middleware\AllStakMiddleware;
-use AllStak\Middleware\AllStakTracingMiddleware;
-use AllStak\Tracing\DBSpanRecorder;
+use AllStak\Helpers\SecurityHelper;  // Confirmed import for binding
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\ServiceProvider;
+use AllStak\Middleware\AllStakTracingMiddleware;
+use AllStak\Tracing\DBSpanRecorder;
 
 class AllStakServiceProvider extends ServiceProvider
 {
     public function register()
     {
-        // Bind core classes to container (auto-wires if no deps; manual if needed)
+        // Register the config file (merge as 'allstak')
+        $this->mergeConfigFrom(
+            __DIR__ . '/../config/AllStakConfig.php', 'allstak'
+        );
+
+        // Bind AllStakClient (as before; alias optional but harmless)
         $this->app->singleton(AllStakClient::class, function ($app) {
+            $config = $app['config']['allstak'];
+
             return new AllStakClient(
-                $app->make(SecurityHelper::class),  // Inject SecurityHelper into Client if needed
-                $app->make(ClientHelper::class),    // If ClientHelper is used
-                config('allstak')                   // Config array
+                $config['api_key'] ?? env('ALLSTAK_API_KEY', ''),
+                $config['environment'] ?? env('ALLSTAK_ENV', app()->environment()),
+                $config['SEND_IP_ADDRESS'] ?? env('ALLSTAK_SEND_IP_ADDRESS', true)
             );
         });
 
+        $this->app->alias(AllStakClient::class, 'allstak');
+
+        // FIXED: Bind SecurityHelper to container (singleton; assumes no deps)
+        // If SecurityHelper constructor needs args (e.g., config), pass them: new SecurityHelper($config)
         $this->app->singleton(SecurityHelper::class, function ($app) {
-            return new SecurityHelper();  // No deps; instantiate directly
-            // If SecurityHelper has deps (e.g., config), pass them: new SecurityHelper(config('allstak'))
+            return new SecurityHelper();  // Direct instantiation; adjust if needed
         });
 
-        // Optional: Bind other helpers (e.g., ClientHelper)
-        $this->app->singleton(ClientHelper::class, function ($app) {
-            return new ClientHelper();
-        });
+        // Optional: If ClientHelper or other helpers used elsewhere, bind similarly
+        // $this->app->singleton(ClientHelper::class, fn($app) => new ClientHelper());
 
-        // Merge config (if config/allstak.php published)
-        $this->mergeConfigFrom(__DIR__ . '/../config/allstak.php', 'allstak');
+        Log::debug('AllStak dependencies registered (Client + SecurityHelper)');
     }
 
     public function boot()
     {
-        // Publish config file
+        // Publish config
         $this->publishes([
-            __DIR__ . '/../config/allstak.php' => config_path('allstak.php')
+            __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
 
         try {
-            // 1. HTTP request span (global middleware)
+            // 1. HTTP request span (global middleware) – unchanged
             $this->app['router']->pushMiddlewareToGroup('web', AllStakTracingMiddleware::class);
             $this->app['router']->pushMiddlewareToGroup('api', AllStakTracingMiddleware::class);
 
-            // 2. DB query tracing (successes via DB::listen)
-            if ($this->app->bound(AllStakClient::class) && $this->app->bound(SecurityHelper::class)) {
-                // FIXED: Pass both dependencies to DBSpanRecorder
-                $recorder = new DBSpanRecorder(
-                    app(AllStakClient::class),
-                    app(SecurityHelper::class)
-                );
+            // 2. DB query tracing – FIXED: Enhanced check + binding confirmation
+            if ($this->app->bound(AllStakClient::class)) {
+                if ($this->app->bound(SecurityHelper::class)) {
+                    // Both bound: Instantiate and register listener
+                    $recorder = new DBSpanRecorder(
+                        app(AllStakClient::class),
+                        app(SecurityHelper::class)
+                    );
 
-                DB::listen(function ($query) use ($recorder) {
-                    $recorder->record($query);
-                });
+                    DB::listen(function ($query) use ($recorder) {
+                        $recorder->record($query);
+                    });
+
+                    Log::info('AllStak DB tracing enabled (with SecurityHelper masking)');
+                } else {
+                    Log::warning('AllStak DB tracing skipped: SecurityHelper not bound. Check register() binding.');
+                }
             } else {
-                Log::warning('AllStak DB tracing skipped: Missing dependencies (AllStakClient or SecurityHelper)');
+                Log::warning('AllStak DB tracing skipped: AllStakClient not bound. Check config/env.');
             }
 
-            // 3. Optional: HTTP logging middleware (if using AllStakMiddleware for non-tracing HTTP logs)
-            // $this->app['router']->pushMiddlewareToGroup('web', AllStakMiddleware::class);
-            // $this->app['router']->pushMiddlewareToGroup('api', AllStakMiddleware::class);
-
-            Log::info('AllStak SDK booted successfully');
-
         } catch (\Exception $e) {
-            Log::error('AllStak initialization failed: ' . $e->getMessage(), [
+            Log::error('AllStak boot failed: ' . $e->getMessage(), [
                 'trace' => $e->getTraceAsString(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine()
+                'file' => $e->getFile() . ':' . $e->getLine()
             ]);
         }
+
+        Log::info('AllStak SDK booted successfully');
     }
 }
