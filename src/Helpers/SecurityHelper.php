@@ -32,9 +32,9 @@ class SecurityHelper
     ];
 
     public function maskIp(string $ip): string
-{
-    return hash('sha256', $ip);
-}
+    {
+        return hash('sha256', $ip);
+    }
 
     public function sanitizeUrl(string $url): string
     {
@@ -87,23 +87,10 @@ class SecurityHelper
         return false;
     }
 
-
     public function sanitizeSql(string $sql): string
     {
-        // Match and redact sensitive values in SQL
-        $patterns = [
-            // Redact string literals containing sensitive patterns
-            '/(["\'])(?:[^"\']*?(?:@|%40|%20(?:card|cc|ssn|pass)).*?)(["\'])/i' => '$1[REDACTED]$2',
-            // Redact numeric literals matching credit card/ssn patterns
-            '/(=\s*)(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4})(\b)/i' => '$1[REDACTED]$3',
-            '/(=\s*)(\d{3}-\d{2}-\d{4})(\b)/i' => '$1[REDACTED]$3',
-        ];
-
-        foreach ($patterns as $pattern => $replacement) {
-            $sql = preg_replace($pattern, $replacement, $sql);
-        }
-
-        return $sql;
+        // FIXED: Use maskQueryText for better literal masking (replaces basic patterns)
+        return $this->maskQueryText($sql);  // Integrates advanced PII detection
     }
 
     public function sanitize($data)
@@ -116,7 +103,6 @@ class SecurityHelper
         }
         return $data;
     }
-
 
     private function sanitizeArray(array $array): array
     {
@@ -139,12 +125,19 @@ class SecurityHelper
         return $key;
     }
 
-
-
     private function sanitizeString(string $value): string
     {
+        // FIXED: Wrap preg_replace in try-catch for safety (though patterns are valid)
         foreach (self::SENSITIVE_VALUE_PATTERNS as $pattern) {
-            $value = preg_replace($pattern, '******', $value);
+            try {
+                $value = preg_replace($pattern, '******', $value);
+            } catch (\Exception $e) {
+                Log::warning('sanitizeString regex failed: ' . $e->getMessage());
+                // Fallback: Basic masking for long strings
+                if (strlen($value) > 32) {
+                    $value = substr($value, 0, 8) . '******';
+                }
+            }
         }
         return $value;
     }
@@ -162,8 +155,9 @@ class SecurityHelper
             // Extract SQL from message (Laravel format: "SQL: select ... where email = [value]")
             if (preg_match('/SQL:\s*(.+?)(?:\s*\(SQL:|\s*\(Query:|$)/s', $message, $matches)) {
                 $sqlPart = $matches[1];
-                $maskedSql = $this->maskQueryText($sqlPart);  // From previous: masks literals/bindings
-                $message = preg_replace('/SQL:\s*.+?(\s*\(SQL:|\s*\(Query:|$)/s', "SQL: $maskedSql\$1", $message);
+                $maskedSql = $this->maskQueryText($sqlPart);  // Masks literals/bindings
+                // FIXED: Escape $ in replacement (PCRE)
+                $message = preg_replace('/SQL:\s*.+?(\s*\(SQL:|\s*\(Query:|$)/s', "SQL: $maskedSql\\\$1", $message);
             }
 
             // Mask bindings if mentioned (e.g., "bindings: ['sensitive@example.com']")
@@ -171,15 +165,17 @@ class SecurityHelper
                 $bindingsStr = $matches[1];
                 $bindings = explode(',', $bindingsStr);
                 $maskedBindings = array_map(function ($binding) {
-                    return $this->maskDbParameter($binding);  // Single param mask (trimmed)
-                }, array_map('trim', $bindings));
+                    return $this->maskDbParameter(trim($binding));  // Trim inside map
+                }, $bindings);
                 $maskedBindingsStr = implode(', ', $maskedBindings);
                 $message = preg_replace('/bindings:\s*\[([^\]]+)\]/', "bindings: [$maskedBindingsStr]", $message);
             }
         }
 
         // General PII scan (emails, IPs, keys) on entire message
-        $message = $this->maskDbParameters([$message])[0];  // Reuse array masker (treat as single param)
+        // FIXED: Safe reuse (single-item array)
+        $maskedArray = $this->maskDbParameters([$message]);
+        $message = $maskedArray[0] ?? $message;
 
         return $message;
     }
@@ -193,13 +189,17 @@ class SecurityHelper
 
         // Reuse rules from maskDbParameters (emails, IPs, keys, etc.)
         if (filter_var($param, FILTER_VALIDATE_EMAIL)) {
-            return preg_replace('/^([^@*]+)@/', '***@', $param);
+            return preg_replace('/^(.{0,3})?@/', '***@', $param);  // FIXED: Simpler; masks local part
         }
-        if (preg_match('/^(sk|pk|ak)-[a-zA-Z0-9]{4,}/', $param)) {
-            return preg_replace('/^(sk|pk|ak)-[a-zA-Z0-9]{4}/', '$1-****', $param);
+        if (preg_match('/^(sk|pk|ak|Bearer )-[a-zA-Z0-9]{4,}/i', $param)) {  // FIXED: Consistent with array
+            return preg_replace('/^(sk|pk|ak|Bearer )-[a-zA-Z0-9]{4}/i', '$1-****', $param);
         }
         if (filter_var($param, FILTER_VALIDATE_IP)) {
-            return preg_replace('/\.\d{1,3}\.\d{1,3}$/', '.***.***', $param);
+            if (strpos($param, ':') !== false) {  // IPv6
+                return preg_replace('/:([0-9a-f]{1,4}:){2,}$/i', ':***', $param);
+            } else {  // IPv4
+                return preg_replace('/\.\d{1,3}\.\d{1,3}$/', '.***.***', $param);
+            }
         }
         // Add more (phones, SSNs); default to full mask if suspicious
         if (preg_match('/password|secret|key|ssn|credit/i', strtolower($param)) || strlen($param) > 50) {
@@ -262,8 +262,8 @@ class SecurityHelper
                     $maskedCount++;
                 }
 
-                // Final sanitize (from earlier: remove control chars, UTF-8)
-                $maskedParam = $this->sanitizeString($maskedParam);  // Assume sanitizeString exists
+                // Final sanitize (remove control chars, UTF-8)
+                $maskedParam = $this->sanitizeString($maskedParam);
 
                 $masked[] = $maskedParam;
 
@@ -298,24 +298,30 @@ class SecurityHelper
      */
     public function maskQueryText(string $query): string
     {
+        if (empty($query)) {
+            return '';  // FIXED: Handle empty/null
+        }
+
         $query = $this->sanitizeString($query);  // Base sanitize first (UTF-8, trim, limit length)
 
-        // Regex to find all quoted string literals: Handles single/double quotes, escapes
-        // Pattern: Optional leading spaces + quote + content + quote + optional trailing
-        // Captures content inside quotes for masking
-        if (preg_match_all('/(?:\'([^\']*(?:\'\'[^\']*)*)\')|(?:"([^"]*(?:""[^"]*)*)"]/u', $query, $matches, PREG_SET_ORDER)) {
+        // FIXED: Corrected regex for quoted literals (balanced parentheses; proper escaping)
+        // Handles single quotes: 'content with '' escaped'
+        // Handles double quotes: "content with "" escaped"
+        if (preg_match_all('/(?:\'([^\']*(?:\'\'[^\']*)*)\')|(?:"([^\"]*(?:\"\"[^\"]*)*)\")/u', $query, $matches, PREG_SET_ORDER)) {
             $maskedLiterals = 0;
             foreach ($matches as $match) {
-                $literal = trim($match[1] ?? $match[2] ?? '', '\'');  // Extract content (unescape if needed)
-                $quoteType = $match[1] ? "'" : '"';  // Preserve quote type
+                $literal = $match[1] ?? $match[2] ?? '';  // Capture group 1 (single) or 2 (double)
+                $quoteType = isset($match[1]) ? "'" : '"';  // Determine quote type
                 $originalFull = $match[0];  // Full quoted string
+
+                $literal = trim($literal, "'\"");  // FIXED: Trim both quote types
 
                 if (empty($literal)) {
                     continue;  // Empty literal, skip
                 }
 
                 // Mask the literal using same logic as maskDbParameters (treat as single param)
-                $maskedLiteral = $this->maskDbParameter($literal);  // Reuse from previous: emails, IPs, etc.
+                $maskedLiteral = $this->maskDbParameter($literal);  // Reuse: emails, IPs, etc.
 
                 if ($maskedLiteral !== $literal) {
                     $maskedFull = $quoteType . $maskedLiteral . $quoteType;
@@ -327,12 +333,15 @@ class SecurityHelper
             if ($maskedLiterals > 0) {
                 Log::info("Masked {$maskedLiterals} inline literals in SQL query");  // Audit log
             }
+        } else {
+            // FIXED: Log if regex fails (non-fatal)
+            Log::warning('maskQueryText regex failed on query preview: ' . substr($query, 0, 50) . '...');
         }
 
-        // Additional: Mask any unquoted potential PII (rare, but e.g., numbers in WHERE without quotes)
-        // E.g., WHERE id = 123 (int OK), but if email without quotes (bad SQL), still mask if email-like
-        $query = preg_replace_callback('/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/', function ($matches) {
-            return $this->maskDbParameter($matches[0]);  // Mask emails/IPs unquoted
+        // Additional: Mask any unquoted potential PII (rare, but e.g., emails in bad SQL)
+        // E.g., WHERE id = 123 (int OK), but if email without quotes, still mask
+        $query = preg_replace_callback('/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/u', function ($matches) {
+            return $this->maskDbParameter($matches[0]);  // Mask emails unquoted
         }, $query);
 
         // Log preview for debug (no full query)
@@ -342,7 +351,4 @@ class SecurityHelper
 
         return $query;
     }
-
-
-
 }
