@@ -147,7 +147,7 @@ class AllStakClient
             $maskedMessage = $securityHelper->maskExceptionMessage($rawMessage, $exception);  // New helper below
             // FIXED: json_encode array fields that DTO expects as String (e.g., code_context, tags if nested)
             $maskedCodeContextJson = json_encode($maskedCodeContext);  // Now a JSON string
-            $tagsJson = json_encode($this->extractTags($exception));  // Ensure tags is flat array; encode if needed
+            $tags = $this->extractTags($exception);
 
             // Main error_logs payload
             $payload = [
@@ -170,7 +170,7 @@ class AllStakClient
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
                 'laravel_version' => app()->version(),
-                'tags' => $tagsJson,  // FIXED: Encode if array (DTO: List<String> will parse JSON array)
+                'tags' => $tags,  // FIXED: Encode if array (DTO: List<String> will parse JSON array)
 
                 // Additional context - FIXED: code_context as JSON string
                 'additional_data' => [
