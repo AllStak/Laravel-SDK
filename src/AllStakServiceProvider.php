@@ -2,6 +2,7 @@
 
 namespace AllStak;
 
+use AllStak\Helpers\SecurityHelper;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
@@ -41,11 +42,18 @@ class AllStakServiceProvider extends ServiceProvider
             $this->app['router']->pushMiddlewareToGroup('api', \AllStak\Middleware\AllStakTracingMiddleware::class);
 
             // 2. DB query tracing
-            if ($this->app->bound(AllStakClient::class)) {
-                $recorder = new DBSpanRecorder(app(AllStakClient::class));
+            if ($this->app->bound(AllStakClient::class) && $this->app->bound(SecurityHelper::class)) {
+                // FIXED: Pass both dependencies to DBSpanRecorder
+                $recorder = new DBSpanRecorder(
+                    app(AllStakClient::class),
+                    app(SecurityHelper::class)
+                );
+
                 DB::listen(function ($query) use ($recorder) {
                     $recorder->record($query);
                 });
+            } else {
+                Log::warning('AllStak DB tracing skipped: Missing dependencies (AllStakClient or SecurityHelper)');
             }
         } catch (\Exception $e) {
             Log::error('AllStak initialization failed: ' . $e->getMessage());
