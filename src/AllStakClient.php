@@ -671,18 +671,34 @@ class AllStakClient
      */
     private function sanitizePayload(array $payload): array
     {
+        // Fields that should STAY as arrays (not be JSON-encoded)
+        $keepAsArray = ['tags', 'breadcrumbs', 'contexts'];
+
+        // Fields that are nested objects to recurse into
+        $nestedObjects = ['database_error', 'additional_data', 'http_error', 'application_error'];
+
         foreach ($payload as $key => $value) {
             if (is_array($value)) {
-                // Recurse on nested (e.g., database_error, additional_data)
-                if (in_array($key, ['database_error', 'additional_data', 'http_error', 'application_error'])) {
+                // Check if this should stay as an array
+                if (in_array($key, $keepAsArray)) {
+                    // Keep as array, just sanitize string values inside
+                    $payload[$key] = array_map(function($item) {
+                        return is_string($item) ? $this->sanitizeString($item) : $item;
+                    }, $value);
+                }
+                // Recurse into nested objects
+                elseif (in_array($key, $nestedObjects)) {
                     $payload[$key] = $this->sanitizePayload($value);
-                } else {
-                    // Top-level arrays (e.g., tags) → JSON if needed
+                }
+                // Otherwise, encode to JSON string (for fields already intended as JSON)
+                else {
                     $payload[$key] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
                 }
-            } elseif (is_object($value)) {
+            }
+            elseif (is_object($value)) {
                 $payload[$key] = $this->sanitizePayload((array) $value);
-            } elseif (is_string($value)) {
+            }
+            elseif (is_string($value)) {
                 // FIXED: For DB fields, extra mask if SQL-like
                 if (strpos($value, 'SELECT') !== false || strpos($value, 'INSERT') !== false) {
                     $payload[$key] = $this->securityHelper->maskQueryText($value);
@@ -691,10 +707,12 @@ class AllStakClient
                 }
                 // Truncate long strings (e.g., stack_trace)
                 $payload[$key] = substr($payload[$key], 0, 10000);
-            } elseif (is_numeric($value) && $key === 'memory_usage') {
+            }
+            elseif (is_numeric($value) && $key === 'memory_usage') {
                 $payload[$key] = min($value, 1073741824);  // Cap 1GB
             }
         }
+
         return $payload;
     }
 
