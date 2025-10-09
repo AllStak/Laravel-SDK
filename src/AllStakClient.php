@@ -142,7 +142,9 @@ class AllStakClient
                 5
             );
             $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);  // Likely array
-
+            $rawMessage = $exception->getMessage() ?: 'Unknown Exception';
+            $securityHelper = $this->securityHelper;  // Assume injected
+            $maskedMessage = $securityHelper->maskExceptionMessage($rawMessage, $exception);  // New helper below
             // FIXED: json_encode array fields that DTO expects as String (e.g., code_context, tags if nested)
             $maskedCodeContextJson = json_encode($maskedCodeContext);  // Now a JSON string
             $tagsJson = json_encode($this->extractTags($exception));  // Ensure tags is flat array; encode if needed
@@ -153,7 +155,7 @@ class AllStakClient
                 'timestamp' => now()->toIso8601String(),
                 'error_type' => $this->mapErrorType($errorCategory),
                 'error_code' => $this->generateErrorCode($exception),
-                'error_message' => $exception->getMessage() ?: 'Unknown Exception',
+                'error_message' => $this->sanitizeString($maskedMessage),  // Now masked + sanitized
                 'error_class' => get_class($exception),
                 'severity' => $errorSeverity,
                 'status' => 'new',
