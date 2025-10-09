@@ -144,41 +144,61 @@ class SecurityHelper
 
     /**
      * Mask PII in exception messages, especially SQL queries with bindings.
-     * Handles Laravel's interpolated SQL in QueryException messages.
+     * Handles Laravel's interpolated SQL (Postgres) or placeholders (MySQL) in QueryException messages.
      */
     public function maskExceptionMessage(string $message, Throwable $exception): string
     {
-        $message = $this->sanitizeString($message);  // Base sanitize
+        $message = $this->sanitizeString($message);  // Base sanitize (control chars, UTF-8)
 
         // If DB exception (Illuminate\Database\QueryException), mask SQL and bindings
         if ($exception instanceof \Illuminate\Database\QueryException) {
-            // Extract SQL from message (Laravel format: "SQL: select ... where email = [value]")
-            if (preg_match('/SQL:\s*(.+?)(?:\s*\(SQL:|\s*\(Query:|$)/s', $message, $matches)) {
-                $sqlPart = $matches[1];
-                $maskedSql = $this->maskQueryText($sqlPart);  // Masks literals/bindings
-                // FIXED: Escape $ in replacement (PCRE)
-                $message = preg_replace('/SQL:\s*.+?(\s*\(SQL:|\s*\(Query:|$)/s', "SQL: $maskedSql\\\$1", $message);
-            }
+            $maskedSql = '';
+            $maskedBindingsStr = '';
 
-            // Mask bindings if mentioned (e.g., "bindings: ['sensitive@example.com']")
-            if (preg_match('/bindings:\s*\[([^\]]+)\]/', $message, $matches)) {
-                $bindingsStr = $matches[1];
-                $bindings = explode(',', $bindingsStr);
-                $maskedBindings = array_map(function ($binding) {
-                    return $this->maskDbParameter(trim($binding));  // Trim inside map
-                }, $bindings);
-                $maskedBindingsStr = implode(', ', $maskedBindings);
-                $message = preg_replace('/bindings:\s*\[([^\]]+)\]/', "bindings: [$maskedBindingsStr]", $message);
+            try {
+                // Extract raw SQL and bindings (always available)
+                $rawSql = $exception->getSql() ?? '';
+                $bindings = $exception->getBindings() ?? [];
+
+                // Mask SQL literals and unquoted PII
+                $maskedSql = $this->maskQueryText($rawSql);
+
+                // Mask bindings array and format as string for message (e.g., "bindings: [***@example.com, active]")
+                $maskedBindings = $this->maskDbParameters($bindings);
+                $maskedBindingsStr = implode(', ', array_map(fn($b) => is_string($b) ? "'$b'" : $b, $maskedBindings));
+
+                // Replace in original message: Look for raw SQL/bindings sections
+                // Postgres: Ends with "(Connection: pgsql, SQL: interpolated_sql)"
+                // MySQL: "SQL: raw_sql with bindings: [array]"
+                if (preg_match('/(SQL:\s*.+?)(?=\s*\(Connection|\s*bindings:|\s*\)|$)/s', $message, $sqlMatches)) {
+                    $sqlSection = $sqlMatches[1];
+                    // Replace raw SQL part with masked (approximate; full message scan below handles rest)
+                    $message = preg_replace('/SQL:\s*.+?(?=\s*\(Connection|\s*bindings:|\s*\)|$)/s', "SQL: $maskedSql", $message);
+                }
+
+                // Replace bindings section if present
+                if (preg_match('/bindings:\s*\[([^\]]+)\]/', $message, $bMatches)) {
+                    $message = preg_replace('/bindings:\s*\[([^\]]+)\]/', "bindings: [$maskedBindingsStr]", $message);
+                }
+
+                Log::debug('Masked DB exception', [
+                    'masked_sql_preview' => substr($maskedSql, 0, 100),
+                    'masked_bindings_count' => count($maskedBindings),
+                    'has_pii_mask' => count(array_filter($maskedBindings, fn($b) => strpos((string)$b, '*') !== false)) > 0
+                ]);
+
+            } catch (\Exception $e) {
+                Log::warning('Failed to mask DB exception details: ' . $e->getMessage());
             }
         }
 
-        // General PII scan (emails, IPs, keys) on entire message
-        // FIXED: Safe reuse (single-item array)
+        // General PII scan on entire message (emails, IPs, keys) – catches interpolated leftovers
         $maskedArray = $this->maskDbParameters([$message]);
         $message = $maskedArray[0] ?? $message;
 
         return $message;
     }
+
 
     /**
      * Mask single DB parameter (helper for maskDbParameters)

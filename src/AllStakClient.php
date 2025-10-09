@@ -200,9 +200,11 @@ class AllStakClient
 
                 // Database error (strings only - good)
                 'database_error' => $this->isDatabaseException($exception) ? [
-                    'query_text' => $this->sanitizeString($this->extractQueryFromException($exception)),
+                    'query_text' => $this->securityHelper->maskQueryText($exception->getSql() ?? ''),  // Masked SQL
                     'database_name' => config('database.connections.' . config('database.default') . '.database'),
                     'constraint_violated' => $this->extractConstraintViolation($exception),
+                    // Add masked bindings as JSON (for backend parsing)
+                    'masked_parameters' => json_encode($this->securityHelper->maskDbParameters($exception->getBindings() ?? [])),
                 ] : null,
 
                 // Application error (strings/ints - good)
@@ -217,15 +219,12 @@ class AllStakClient
             ];
 
             // FIXED: Sanitize/encode full payload before sending
-            $payload = $this->sanitizePayload($payload);  // New helper: recursive sanitize + encode arrays as needed
-
-            Log::debug('AllStak Exception Payload prepared for send', [
+            Log::debug('AllStak Exception Payload prepared', [
                 'trace_id' => $traceId,
-                'error_message_preview' => substr($payload['error_message'], 0, 100),
-                'additional_data_keys' => array_keys($payload['additional_data'] ?? []),
-                'tags_count' => is_string($payload['tags']) ? count(json_decode($payload['tags'], true)) : count($payload['tags'] ?? [])
-            ]);  // Log previews only (security + size)
-
+                'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
+                'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
+            ]);
+            $payload = $this->sanitizePayload($payload);
             $this->transport->send(self::API_URL . '/errors', $payload);
 
             return true;
@@ -674,23 +673,31 @@ class AllStakClient
     {
         foreach ($payload as $key => $value) {
             if (is_array($value)) {
-                // Nested objects (e.g., additional_data) - recurse
-                $payload[$key] = $this->sanitizePayload($value);
+                // Recurse on nested (e.g., database_error, additional_data)
+                if (in_array($key, ['database_error', 'additional_data', 'http_error', 'application_error'])) {
+                    $payload[$key] = $this->sanitizePayload($value);
+                } else {
+                    // Top-level arrays (e.g., tags) → JSON if needed
+                    $payload[$key] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+                }
             } elseif (is_object($value)) {
-                // Convert objects to arrays first
                 $payload[$key] = $this->sanitizePayload((array) $value);
-            } elseif (is_array($value) && in_array($key, ['code_context', 'tags', 'request_headers', 'request_body'])) {
-                // FIXED: Specific fields - encode arrays to JSON strings
-                $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-                $payload[$key] = substr($encoded, 0, 10000);  // Truncate
             } elseif (is_string($value)) {
-                $payload[$key] = $this->sanitizeString($value);  // From earlier: removes control chars
+                // FIXED: For DB fields, extra mask if SQL-like
+                if (strpos($value, 'SELECT') !== false || strpos($value, 'INSERT') !== false) {
+                    $payload[$key] = $this->securityHelper->maskQueryText($value);
+                } else {
+                    $payload[$key] = $this->sanitizeString($value);
+                }
+                // Truncate long strings (e.g., stack_trace)
+                $payload[$key] = substr($payload[$key], 0, 10000);
             } elseif (is_numeric($value) && $key === 'memory_usage') {
-                $payload[$key] = min($value, 1073741824);  // Cap at 1GB
+                $payload[$key] = min($value, 1073741824);  // Cap 1GB
             }
         }
         return $payload;
     }
+
 
     /**
      * Sanitize string for JSON: Remove/escape control chars, ensure UTF-8, trim and limit length.
