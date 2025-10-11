@@ -639,13 +639,41 @@ class AllStakClient
         return 'OTHER';
     }
 
+    /**
+     * Extract all table names from query (useful for JOIN queries)
+     * Returns array of table names
+     */
+    private function extractAllTableNames(string $query): array
+    {
+        $query = preg_replace('/\s+/', ' ', trim($query));
+        $tables = [];
+
+        // Universal pattern for all DB engines
+        // Matches: `table`, "table", [table], table with optional schema
+        $pattern = '/(?:FROM|JOIN)\s+(?:[`"\[]?(?:\w+)[`"\]]?\.)?[`"\[]?(\w+)[`"\]]?/i';
+
+        if (preg_match_all($pattern, $query, $matches)) {
+            $tables = array_unique($matches[1]);
+        }
+
+        // Fallback for INSERT/UPDATE/DELETE
+        if (empty($tables)) {
+            $singlePattern = '/(?:INTO|UPDATE)\s+(?:[`"\[]?(?:\w+)[`"\]]?\.)?[`"\[]?(\w+)[`"\]]?/i';
+            if (preg_match($singlePattern, $query, $matches)) {
+                $tables[] = $matches[1];
+            }
+        }
+
+        return array_values($tables);
+    }
+
+    /**
+     * Get primary table (first table in query)
+     */
     private function extractTableName(string $query): ?string
     {
-        // Simple regex to extract table name
-        if (preg_match('/(?:FROM|INTO|UPDATE|TABLE)\s+`?(\w+)`?/i', $query, $matches)) {
-            return $matches[1];
-        }
-        return null;
+        $tables = $this->extractAllTableNames($query);
+        return !empty($tables) ? $tables[0] : 'unknown';
     }
 
     private function getResponseBody($response): ?string
