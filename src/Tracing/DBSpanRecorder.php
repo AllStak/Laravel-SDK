@@ -75,36 +75,71 @@ class DBSpanRecorder
      */
     public function recordFailedQuery(QueryException $exception)
     {
-        if (self::$isRecording) return;
+        if (self::$isRecording) {
+            return;
+        }
 
         try {
             self::$isRecording = true;
-
             $traceId = SpanContext::getTraceId();
 
-            // FIXED: Mask SQL and bindings for failures
+            // Mask SQL and bindings for failures
             $maskedQueryText = $this->securityHelper->maskQueryText($exception->getSql() ?? '');
             $maskedBindings = $this->securityHelper->maskDbParameters($exception->getBindings() ?? []);
 
+            // Extract error details from QueryException
+            $errorCode = $exception->getCode();
+            $errorMessage = $exception->getMessage();
+
+            // Get stack trace (limit to first 10 lines for size/security)
+            $stackTrace = $this->getStackTraceSummary($exception);
+
+            // ✅ Call sendDbQuery with error parameters
             $this->client->sendDbQuery(
                 queryText: $maskedQueryText,
                 bindings: $maskedBindings,
-                duration: 0,  // Failed, no time
+                duration: 0, // Failed, no execution time
                 connectionName: $exception->getConnectionName() ?? config('database.default'),
                 traceId: $traceId,
                 success: false,
-                errorCode: $exception->getCode(),
-                errorMessage: $this->securityHelper->maskExceptionMessage($exception->getMessage(), $exception)  // From previous
+                errorCode: (string)$errorCode,
+                errorMessage: $this->securityHelper->maskExceptionMessage($errorMessage, $exception),
+                stackTrace: $stackTrace
             );
 
             Log::warning('Failed DB Query Recorded', [
                 'trace_id' => $traceId,
-                'error_code' => $exception->getCode(),
+                'error_code' => $errorCode,
                 'masked' => true
             ]);
 
+        } catch (\Exception $e) {
+            Log::error('Failed to record failed query', [
+                'error' => $e->getMessage()
+            ]);
         } finally {
             self::$isRecording = false;
         }
     }
+
+    /**
+     * Get a summary of stack trace (limited for security/size)
+     */
+    private function getStackTraceSummary(\Exception $exception, int $limit = 10): string
+    {
+        $trace = $exception->getTrace();
+        $summary = [];
+
+        foreach (array_slice($trace, 0, $limit) as $index => $frame) {
+            $file = $frame['file'] ?? 'unknown';
+            $line = $frame['line'] ?? 0;
+            $function = $frame['function'] ?? 'unknown';
+            $class = $frame['class'] ?? '';
+
+            $summary[] = "#{$index} {$class}{$function}() at {$file}:{$line}";
+        }
+
+        return implode("\n", $summary);
+    }
+
 }

@@ -302,7 +302,10 @@ class AllStakClient
         float $duration,
         string $connectionName,
         ?string $traceId = null,
-        bool $success = true
+        bool $success = true,
+        ?string $errorCode = null,        // ✅ NEW: Error code for failed queries
+        ?string $errorMessage = null,     // ✅ NEW: Error message for failed queries
+        ?string $stackTrace = null        // ✅ NEW: Stack trace for debugging
     ): bool {
         if (!$this->isAllowed()) {
             Log::warning('AllStak rate limit exceeded or SDK disabled');
@@ -340,7 +343,29 @@ class AllStakClient
                 'laravel_version' => app()->version(),
             ];
 
-            Log::debug('AllStak DB Query Payload', ['payload' => $payload]);
+            // ✅ Add error-specific fields when query fails
+            if (!$success) {
+                $payload['error_code'] = $errorCode ?? 'UNKNOWN';
+                $payload['error_message'] = $errorMessage ?? 'Database query failed';
+                $payload['error_type'] = 'DATABASE_ERROR';
+
+                // Only include stack trace if provided (for security/size reasons)
+                if ($stackTrace) {
+                    $payload['stack_trace'] = $stackTrace;
+                }
+
+                Log::debug('AllStak DB Query Failed', [
+                    'trace_id' => $traceId,
+                    'error_code' => $errorCode,
+                    'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
+                ]);
+            }
+
+            Log::debug('AllStak DB Query Payload', [
+                'trace_id' => $traceId,
+                'success' => $success,
+                'query_type' => $payload['query_type']
+            ]);
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/db-queries', $payload);
@@ -351,6 +376,7 @@ class AllStakClient
             return false;
         }
     }
+
 
     /**
      * Capture framework logs to framework_logs table
