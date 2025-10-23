@@ -49,7 +49,12 @@ class AllStakServiceProvider extends ServiceProvider
             );
         });
 
-        Log::debug('AllStak dependencies registered');
+        // Register custom log channel early in the service container registration
+        $this->app->resolving('log', function ($logManager, $app) {
+            $logManager->extend('allstak', function ($app, $config) {
+                return (new AllStakLogChannel())($config);
+            });
+        });
     }
 
     public function boot()
@@ -58,11 +63,6 @@ class AllStakServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
-
-        // Register custom log channel
-        Log::extend('allstak', function ($app, $config) {
-            return (new AllStakLogChannel())($config);
-        });
 
         // Check if SDK is enabled
         if (!config('allstak.enabled', true)) {
