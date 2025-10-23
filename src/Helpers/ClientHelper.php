@@ -2,6 +2,7 @@
 
 namespace AllStak\Helpers;
 
+use AllStak\Helpers\Security\SecurityHelper;
 use DateTimeInterface;
 use Throwable;
 
