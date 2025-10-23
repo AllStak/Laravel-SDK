@@ -557,7 +557,6 @@ class AllStakClient
     {
         $this->flush();
     }
-}
 
     /**
      * Send a log message to AllStak backend
