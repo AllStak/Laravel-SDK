@@ -3,6 +3,16 @@
     "description": "Official Laravel SDK for AllStak error tracking and monitoring",
     "type": "library",
     "license": "MIT",
+    "keywords": [
+        "laravel",
+        "monitoring",
+        "error-tracking",
+        "logging",
+        "allstak",
+        "observability",
+        "tracing"
+    ],
+    "homepage": "https://allstak.io",
     "autoload": {
         "psr-4": {
             "AllStak\\": "src/"
@@ -17,10 +27,18 @@
     "require": {
         "php": ">=7.2 <9.0",
         "illuminate/support": "^5.0 || ^6.0 || ^7.0 || ^8.0 || ^9.0 || ^10.0 || ^11.0 || ^12.0",
-        "symfony/http-client": "^4.4 || ^5.4 || ^6.0 || ^7.0"
+        "symfony/http-client": "^4.4 || ^5.4 || ^6.0 || ^7.0",
+        "monolog/monolog": "^1.25 || ^2.0 || ^3.0",
+        "psr/log": "^1.0 || ^2.0 || ^3.0"
     },
     "require-dev": {
-        "orchestra/testbench": "^3.0 || ^4.0 || ^5.0 || ^6.0 || ^7.0 || ^8.0 || ^9.0"
+        "orchestra/testbench": "^3.0 || ^4.0 || ^5.0 || ^6.0 || ^7.0 || ^8.0 || ^9.0",
+        "phpunit/phpunit": "^8.5 || ^9.0 || ^10.0"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "AllStak\\Tests\\": "tests/"
+        }
     },
     "extra": {
         "laravel": {
@@ -28,6 +46,10 @@
                 "AllStak\\AllStakServiceProvider"
             ]
         }
+    },
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true
     },
     "minimum-stability": "stable",
     "prefer-stable": true

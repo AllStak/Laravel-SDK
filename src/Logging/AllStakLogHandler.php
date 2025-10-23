@@ -3,53 +3,42 @@
 namespace AllStak\Logging;
 
 use AllStak\AllStakClient;
+use Monolog\Handler\AbstractProcessingHandler;
+use Monolog\LogRecord;
 
-class AllStakLogHandler
+class AllStakLogHandler extends AbstractProcessingHandler
 {
     private AllStakClient $allStakClient;
-    private string $level;
 
-    public function __construct(AllStakClient $allStakClient, string $level = 'debug')
+    public function __construct(AllStakClient $allStakClient, $level = \Monolog\Logger::DEBUG, bool $bubble = true)
     {
+        parent::__construct($level, $bubble);
         $this->allStakClient = $allStakClient;
-        $this->level = $level;
     }
 
     /**
-     * Handle the log record
+     * Writes the record down to the log of the implementing handler
      */
-    public function handle(array $record): bool
+    protected function write(LogRecord $record): void
     {
-        // Check if we should handle this level
-        if (!$this->shouldHandle($record['level_name'] ?? 'info')) {
-            return false;
+        $context = $record->context;
+        
+        // Extract trace ID if present
+        $traceId = $context['trace_id'] ?? null;
+        if (isset($context['trace_id'])) {
+            unset($context['trace_id']);
         }
 
-        // Extract context and extra data
-        $context = array_merge($record['context'] ?? [], $record['extra'] ?? []);
+        // Map Monolog levels to AllStak levels
+        $level = strtolower($record->level->getName());
         
-        // Get trace ID from context if available
-        $traceId = $context['trace_id'] ?? null;
-        unset($context['trace_id']); // Remove from context to avoid duplication
-
-        // Convert level to lowercase
-        $level = strtolower($record['level_name'] ?? 'info');
-
-        // Send to AllStak backend
-        return $this->allStakClient->log(
-            $level,
-            $record['message'] ?? '',
-            $context,
-            $traceId
-        );
-    }
-
-    private function shouldHandle(string $levelName): bool
-    {
-        $levels = ['debug' => 0, 'info' => 1, 'warning' => 2, 'error' => 3];
-        $recordLevel = $levels[strtolower($levelName)] ?? 1;
-        $handlerLevel = $levels[strtolower($this->level)] ?? 0;
-        
-        return $recordLevel >= $handlerLevel;
+        try {
+            $reflection = new \ReflectionClass($this->allStakClient);
+            $logMethod = $reflection->getMethod('log');
+            $logMethod->setAccessible(true);
+            $logMethod->invoke($this->allStakClient, $level, $record->message, $context, $traceId);
+        } catch (\Exception $e) {
+            error_log('AllStak logging failed: ' . $e->getMessage());
+        }
     }
 }
