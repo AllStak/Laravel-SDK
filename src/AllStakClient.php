@@ -52,6 +52,15 @@ class AllStakClient
         $this->sendIpAddress = $sendIpAddress;
         $this->serviceName = $serviceName;
 
+        // Initialize helper objects first (always needed)
+        $this->securityHelper = new SecurityHelper();
+        $this->clientHelper = new ClientHelper($this->securityHelper);
+        $this->rateLimitingHelper = new RateLimitingHelper($apiKey);
+        $this->tracingHelper = new TracingHelper();
+        $this->errorHelper = new ErrorHelper();
+        $this->dataTransformHelper = new DataTransformHelper();
+        $this->payloadHelper = new PayloadHelper($this->securityHelper);
+
         // Validate API key and enable SDK
         if (empty($apiKey) || strlen($apiKey) < 10) {
             Log::warning('AllStak SDK disabled: Invalid or empty API key');
@@ -73,14 +82,6 @@ class AllStakClient
                 config('allstak.use_compression', true)
             );
         }
-
-        $this->securityHelper = new SecurityHelper();
-        $this->clientHelper = new ClientHelper($this->securityHelper);
-        $this->rateLimitingHelper = new RateLimitingHelper($apiKey);
-        $this->tracingHelper = new TracingHelper();
-        $this->errorHelper = new ErrorHelper();
-        $this->dataTransformHelper = new DataTransformHelper();
-        $this->payloadHelper = new PayloadHelper($this->securityHelper);
     }
 
     /**
