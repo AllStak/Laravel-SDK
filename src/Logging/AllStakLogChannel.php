@@ -3,6 +3,7 @@
 namespace AllStak\Logging;
 
 use AllStak\AllStakClient;
+use Psr\Log\LoggerInterface;
 
 class AllStakLogChannel
 {
@@ -24,7 +25,7 @@ class AllStakLogChannel
     }
 }
 
-class AllStakLogger
+class AllStakLogger implements LoggerInterface
 {
     private AllStakClient $allStakClient;
 
