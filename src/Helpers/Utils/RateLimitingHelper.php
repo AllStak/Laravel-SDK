@@ -29,22 +29,33 @@ class RateLimitingHelper
     public function shouldThrottle(): bool
     {
         try {
+            // Check if Laravel facades are available
+            if (!class_exists('\Illuminate\Support\Facades\Cache')) {
+                return false; // Skip rate limiting if Cache facade not available
+            }
+
             $attempts = Cache::get($this->rateLimitKey, 0);
 
             if ($attempts >= self::MAX_ATTEMPTS) {
-                Log::debug('AllStak rate limit exceeded', ['attempts' => $attempts]);
+                if (class_exists('\Illuminate\Support\Facades\Log')) {
+                    Log::debug('AllStak rate limit exceeded', ['attempts' => $attempts]);
+                }
                 return true;
             }
 
             // Increment attempts
             Cache::put($this->rateLimitKey, $attempts + 1, self::DECAY_SECONDS);
 
-            Log::debug('AllStak rate limit check', ['attempts' => $attempts + 1]);
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak rate limit check', ['attempts' => $attempts + 1]);
+            }
             return false;
         } catch (\Exception $e) {
-            Log::warning('AllStak rate limiting failed, proceeding without limit', [
-                'error' => $e->getMessage()
-            ]);
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::warning('AllStak rate limiting failed, proceeding without limit', [
+                    'error' => $e->getMessage()
+                ]);
+            }
             return false; // Fail open to avoid blocking
         }
     }
@@ -56,7 +67,9 @@ class RateLimitingHelper
      */
     public function resetRateLimit(): void
     {
-        Cache::forget($this->rateLimitKey);
+        if (class_exists('\Illuminate\Support\Facades\Cache')) {
+            Cache::forget($this->rateLimitKey);
+        }
     }
     
     /**
@@ -66,6 +79,9 @@ class RateLimitingHelper
      */
     public function getCurrentAttempts(): int
     {
-        return Cache::get($this->rateLimitKey, 0);
+        if (class_exists('\Illuminate\Support\Facades\Cache')) {
+            return Cache::get($this->rateLimitKey, 0);
+        }
+        return 0;
     }
 }
