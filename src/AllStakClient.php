@@ -558,3 +558,78 @@ class AllStakClient
         $this->flush();
     }
 }
+
+    /**
+     * Send a log message to AllStak backend
+     */
+    public function log(string $level, string $message, array $context = [], ?string $traceId = null): bool
+    {
+        if (!$this->isAllowed()) {
+            return false;
+        }
+
+        try {
+            $traceId = $traceId ?? $this->generateTraceId();
+
+            $payload = [
+                'trace_id' => $traceId,
+                'level' => strtolower($level),
+                'message' => $this->payloadHelper->sanitizeString($message),
+                'context' => $this->payloadHelper->sanitizePayload($context),
+                'timestamp' => now()->toISOString(),
+                'service_name' => $this->serviceName,
+                'environment' => $this->environment,
+                'user_id' => request()->user()?->id ?? null,
+                'session_id' => request()->session()?->getId(),
+                'request_id' => request()->header('X-Request-ID'),
+                'process_id' => getmypid(),
+                'hostname' => gethostname(),
+                'sdk_version' => self::SDK_VERSION,
+                'sdk_language' => 'php',
+                'sdk_platform' => 'laravel',
+                'php_version' => PHP_VERSION,
+                'laravel_version' => app()->version(),
+            ];
+
+            // Use async transport (non-blocking)
+            $this->transport->send(self::API_URL . '/logs', $payload);
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Failed to send log to AllStak: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Log debug message
+     */
+    public function logDebug(string $message, array $context = [], ?string $traceId = null): bool
+    {
+        return $this->log('debug', $message, $context, $traceId);
+    }
+
+    /**
+     * Log info message
+     */
+    public function logInfo(string $message, array $context = [], ?string $traceId = null): bool
+    {
+        return $this->log('info', $message, $context, $traceId);
+    }
+
+    /**
+     * Log warning message
+     */
+    public function logWarning(string $message, array $context = [], ?string $traceId = null): bool
+    {
+        return $this->log('warning', $message, $context, $traceId);
+    }
+
+    /**
+     * Log error message
+     */
+    public function logError(string $message, array $context = [], ?string $traceId = null): bool
+    {
+        return $this->log('error', $message, $context, $traceId);
+    }
+}

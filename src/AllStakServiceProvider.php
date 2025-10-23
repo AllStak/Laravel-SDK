@@ -4,6 +4,7 @@ namespace AllStak;
 
 use AllStak\AllStakClient;
 use AllStak\Helpers\SecurityHelper;  // Confirmed import for binding
+use AllStak\Logging\AllStakLogChannel;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
@@ -57,6 +58,11 @@ class AllStakServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
+
+        // Register custom log channel
+        $this->app['log']->extend('allstak', function ($app, $config) {
+            return (new AllStakLogChannel())($config);
+        });
 
         // Check if SDK is enabled
         if (!config('allstak.enabled', true)) {
