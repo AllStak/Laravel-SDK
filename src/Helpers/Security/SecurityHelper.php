@@ -128,4 +128,20 @@ class SecurityHelper
         
         return $query;
     }
+
+    /**
+     * Mask sensitive database parameters/bindings
+     */
+    public function maskDbParameters(array $parameters): array
+    {
+        $masked = [];
+        foreach ($parameters as $key => $value) {
+            if (is_string($value) && ($this->isSensitiveKey((string)$key) || $this->isSensitiveValue($value))) {
+                $masked[$key] = '******';
+            } else {
+                $masked[$key] = $value;
+            }
+        }
+        return $masked;
+    }
 }

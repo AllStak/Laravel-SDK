@@ -3,22 +3,22 @@
 namespace AllStak;
 
 use AllStak\Helpers\ClientHelper;
-use AllStak\Helpers\Security\SecurityHelper;
-use AllStak\Helpers\Utils\RateLimitingHelper;
-use AllStak\Helpers\Utils\TracingHelper;
 use AllStak\Helpers\Utils\ErrorHelper;
-use AllStak\Helpers\Utils\DataTransformHelper;
 use AllStak\Helpers\Http\PayloadHelper;
+use AllStak\Helpers\Security\SecurityHelper;
+use AllStak\Helpers\Utils\TracingHelper;
+use AllStak\Helpers\Utils\RateLimitingHelper;
+use AllStak\Helpers\Utils\DataTransformHelper;
+use AllStak\Transport\AsyncHttpTransport;
 use AllStak\Tracing\Span;
 use AllStak\Tracing\SpanContext;
-use AllStak\Transport\AsyncHttpTransport;
+use Throwable;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Symfony\Component\HttpClient\HttpClient;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\app;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\HttpClient\HttpClient;
-use Symfony\Contracts\HttpClient\HttpClientInterface;
-use Throwable;
 use Illuminate\Contracts\Cache\Repository;
 
 class AllStakClient
@@ -90,9 +90,16 @@ class AllStakClient
     private function isAllowed(): bool
     {
         if (!$this->enabled) {
+            Log::debug('AllStak SDK is disabled');
             return false;
         }
-        return !$this->rateLimitingHelper->shouldThrottle();
+        
+        $shouldThrottle = $this->rateLimitingHelper->shouldThrottle();
+        if ($shouldThrottle) {
+            Log::debug('AllStak rate limit exceeded');
+        }
+        
+        return !$shouldThrottle;
     }
 
     /**
@@ -109,7 +116,7 @@ class AllStakClient
     public function captureException(Throwable $exception, ?Request $request = null, ?string $traceId = null): bool
     {
         if (!$this->isAllowed()) {
-            Log::warning('AllStak rate limit exceeded or SDK disabled');
+            Log::debug('AllStak captureException blocked - SDK disabled or rate limited');
             return false;
         }
 
@@ -184,11 +191,13 @@ class AllStakClient
 
                 // Database error (strings only - good)
                 'database_error' => $this->errorHelper->isDatabaseException($exception) ? [
-                    'query_text' => $this->securityHelper->maskQueryText($exception->getSql() ?? ''),  // Masked SQL
+                    'query_text' => $this->securityHelper->maskQueryText($this->errorHelper->extractQueryFromException($exception) ?? ''),  // Masked SQL
                     'database_name' => config('database.connections.' . config('database.default') . '.database'),
                     'constraint_violated' => $this->errorHelper->extractConstraintViolation($exception),
-                    // Add masked bindings as JSON (for backend parsing)
-                    'masked_parameters' => json_encode($this->securityHelper->maskDbParameters($exception->getBindings() ?? [])),
+                    // Add masked bindings as JSON (for backend parsing) - only if method exists
+                    'masked_parameters' => json_encode($this->securityHelper->maskDbParameters(
+                        method_exists($exception, 'getBindings') ? $exception->getBindings() : []
+                    )),
                 ] : null,
 
                 // Application error (strings/ints - good)
@@ -209,7 +218,14 @@ class AllStakClient
                 'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
             ]);
             $payload = $this->payloadHelper->sanitizePayload($payload);
-            $this->transport->send(self::API_URL . '/errors', $payload);
+            
+            if ($this->transport) {
+                $this->transport->send(self::API_URL . '/errors', $payload);
+                Log::debug('AllStak Exception sent successfully', ['trace_id' => $traceId]);
+            } else {
+                Log::error('AllStak transport not initialized');
+                return false;
+            }
 
             return true;
         } catch (\Exception $e) {

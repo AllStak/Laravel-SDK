@@ -33,10 +33,8 @@ class AllStakLogHandler extends AbstractProcessingHandler
         $level = strtolower($record->level->getName());
         
         try {
-            $reflection = new \ReflectionClass($this->allStakClient);
-            $logMethod = $reflection->getMethod('log');
-            $logMethod->setAccessible(true);
-            $logMethod->invoke($this->allStakClient, $level, $record->message, $context, $traceId);
+            // Use the public log method directly instead of reflection
+            $this->allStakClient->log($level, $record->message, $context, $traceId);
         } catch (\Exception $e) {
             error_log('AllStak logging failed: ' . $e->getMessage());
         }
