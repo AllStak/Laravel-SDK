@@ -128,7 +128,16 @@ class AllStakClient
 
         try {
             $traceId = $traceId ?? $this->generateTraceId();
-            $request = $request ?? \request();
+            // Safely get request - avoid calling \request() in CLI context
+            if ($request === null) {
+                try {
+                    if (function_exists('request') && \request() !== null) {
+                        $request = \request();
+                    }
+                } catch (\Exception $e) {
+                    // Not in HTTP context, leave request as null
+                }
+            }
 
             $errorSeverity = $this->clientHelper->determineErrorSeverity($exception);
             $errorCategory = $this->clientHelper->determineErrorCategory($exception);
@@ -160,8 +169,8 @@ class AllStakClient
                 'source' => 'SDK',
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'ip' => $this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip()),
-                'user_id' => $request->user()?->id ?? null,
+                'ip' => $request ? ($this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip())) : 'unknown',
+                'user_id' => $request ? ($request->user()?->id ?? null) : null,
                 'sdk_version' => self::SDK_VERSION,
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
@@ -179,7 +188,7 @@ class AllStakClient
                 ],
 
                 // HTTP error details (already has json_encode for headers/body - good)
-                'http_error' => $this->errorHelper->isHttpException($exception) ? [
+                'http_error' => $this->errorHelper->isHttpException($exception) && $request ? [
                     'http_method' => $request->method(),
                     'http_url' => $this->securityHelper->sanitizeUrl($request->fullUrl()),
                     'http_path' => $request->path(),
@@ -219,44 +228,25 @@ class AllStakClient
             ];
 
             // FIXED: Sanitize/encode full payload before sending
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::debug('AllStak Exception Payload prepared', [
-                    'trace_id' => $traceId,
-                    'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
-                    'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
-                ]);
-            } else {
-                error_log('AllStak Exception Payload prepared - trace_id: ' . $traceId);
-            }
+            $this->safeLog('debug', 'AllStak Exception Payload prepared', [
+                'trace_id' => $traceId,
+                'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
+                'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
+            ]);
+            
             $payload = $this->payloadHelper->sanitizePayload($payload);
             
             if ($this->transport) {
                 $this->transport->send(self::API_URL . '/errors', $payload);
-                // Use error_log if Laravel facades are not available
-                if (class_exists('\Illuminate\Support\Facades\Log')) {
-                    Log::debug('AllStak Exception sent successfully', ['trace_id' => $traceId]);
-                } else {
-                    error_log('AllStak Exception sent successfully - trace_id: ' . $traceId);
-                }
+                $this->safeLog('debug', 'AllStak Exception sent successfully', ['trace_id' => $traceId]);
             } else {
-                // Use error_log if Laravel facades are not available
-                if (class_exists('\Illuminate\Support\Facades\Log')) {
-                    Log::error('AllStak transport not initialized');
-                } else {
-                    error_log('AllStak transport not initialized');
-                }
+                $this->safeLog('error', 'AllStak transport not initialized');
                 return false;
             }
 
             return true;
         } catch (\Exception $e) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::error('Failed to send error to AllStak: ' . $e->getMessage());
-            } else {
-                error_log('Failed to send error to AllStak: ' . $e->getMessage());
-            }
+            $this->safeLog('error', 'Failed to send error to AllStak: ' . $e->getMessage());
             return false;
         }
     }
@@ -271,12 +261,7 @@ class AllStakClient
         ?string $traceId = null
     ): bool {
         if (!$this->isAllowed()) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::warning('AllStak rate limit exceeded or SDK disabled');
-            } else {
-                error_log('AllStak rate limit exceeded or SDK disabled');
-            }
+            $this->safeLog('warning', 'AllStak rate limit exceeded or SDK disabled');
             return false;
         }
 
@@ -313,24 +298,14 @@ class AllStakClient
                 'laravel_version' => \app()->version(),
             ];
 
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::debug('AllStak HTTP Request Payload', ['payload' => $payload]);
-            } else {
-                error_log('AllStak HTTP Request Payload sent');
-            }
+            $this->safeLog('debug', 'AllStak HTTP Request Payload', ['payload' => $payload]);
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/http-logs', $payload);
 
             return true;
         } catch (\Exception $e) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::error('Failed to send request to AllStak: ' . $e->getMessage());
-            } else {
-                error_log('Failed to send request to AllStak: ' . $e->getMessage());
-            }
+            $this->safeLog('error', 'Failed to send request to AllStak: ' . $e->getMessage());
             return false;
         }
     }
@@ -357,6 +332,18 @@ class AllStakClient
         try {
             $traceId = $traceId ?? $this->generateTraceId();
 
+            // Safely get request data - check if we're in HTTP context
+            $userId = null;
+            
+            try {
+                if (function_exists('request') && \request() !== null) {
+                    $request = \request();
+                    $userId = $request->user()?->id ?? null;
+                }
+            } catch (\Exception $e) {
+                // Not in HTTP context, leave request data as null
+            }
+
             $payload = [
                 'trace_id' => $traceId,
                 'timestamp' => now()->toIso8601String(),
@@ -372,7 +359,7 @@ class AllStakClient
                 'parameters' => json_encode($bindings),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => \request()->user()?->id ?? null,
+                'user_id' => $userId,
                 'connection_id' => $connectionName,
                 'is_success' => $success,
                 'is_slow' => $duration > 1000, // Slow if > 1 second
@@ -396,40 +383,25 @@ class AllStakClient
                     $payload['stack_trace'] = $stackTrace;
                 }
 
-                // Use error_log if Laravel facades are not available
-                if (class_exists('\Illuminate\Support\Facades\Log')) {
-                    Log::debug('AllStak DB Query Failed', [
-                        'trace_id' => $traceId,
-                        'error_code' => $errorCode,
-                        'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
-                    ]);
-                } else {
-                    error_log('AllStak DB Query Failed - trace_id: ' . $traceId . ', error_code: ' . $errorCode);
-                }
+                $this->safeLog('debug', 'AllStak DB Query Failed', [
+                    'trace_id' => $traceId,
+                    'error_code' => $errorCode,
+                    'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
+                ]);
             }
 
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::debug('AllStak DB Query Payload', [
-                    'trace_id' => $traceId,
-                    'success' => $success,
-                    'query_type' => $payload['query_type']
-                ]);
-            } else {
-                error_log('AllStak DB Query Payload sent - trace_id: ' . $traceId . ', success: ' . ($success ? 'true' : 'false'));
-            }
+            $this->safeLog('debug', 'AllStak DB Query Payload', [
+                'trace_id' => $traceId,
+                'success' => $success,
+                'query_type' => $payload['query_type']
+            ]);
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/db-queries', $payload);
 
             return true;
         } catch (\Exception $e) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::error('Failed to send DB query to AllStak: ' . $e->getMessage());
-            } else {
-                error_log('Failed to send DB query to AllStak: ' . $e->getMessage());
-            }
+            $this->safeLog('error', 'Failed to send DB query to AllStak: ' . $e->getMessage());
             return false;
         }
     }
@@ -472,9 +444,25 @@ class AllStakClient
                 'framework_version' => \app()->version(),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => \request()->user()?->id ?? null,
-                'session_id' => \request()->session()?->getId(),
-                'request_id' => \request()->header('X-Request-ID'),
+                // Safely get request data - check if we're in HTTP context
+                $userId = null;
+                $sessionId = null;
+                $requestId = null;
+                
+                try {
+                    if (function_exists('request') && \request() !== null) {
+                        $request = \request();
+                        $userId = $request->user()?->id ?? null;
+                        $sessionId = $request->session()?->getId();
+                        $requestId = $request->header('X-Request-ID');
+                    }
+                } catch (\Exception $e) {
+                    // Not in HTTP context, leave request data as null
+                }
+
+                'user_id' => $userId,
+                'session_id' => $sessionId,
+                'request_id' => $requestId,
                 'process_id' => getmypid(),
                 'hostname' => gethostname(),
                 'sdk_version' => self::SDK_VERSION,
@@ -689,6 +677,23 @@ class AllStakClient
         try {
             $traceId = $traceId ?? $this->generateTraceId();
 
+            // Safely get request data - check if we're in HTTP context
+            $request = null;
+            $userId = null;
+            $sessionId = null;
+            $requestId = null;
+            
+            try {
+                if (function_exists('request') && \request() !== null) {
+                    $request = \request();
+                    $userId = $request->user()?->id ?? null;
+                    $sessionId = $request->session()?->getId();
+                    $requestId = $request->header('X-Request-ID');
+                }
+            } catch (\Exception $e) {
+                // Not in HTTP context, leave request data as null
+            }
+
             $payload = [
                 'trace_id' => $traceId,
                 'level' => strtolower($level),
@@ -697,9 +702,9 @@ class AllStakClient
                 'timestamp' => now()->toISOString(),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => \request()->user()?->id ?? null,
-                'session_id' => \request()->session()?->getId(),
-                'request_id' => \request()->header('X-Request-ID'),
+                'user_id' => $userId,
+                'session_id' => $sessionId,
+                'request_id' => $requestId,
                 'process_id' => getmypid(),
                 'hostname' => gethostname(),
                 'sdk_version' => self::SDK_VERSION,
