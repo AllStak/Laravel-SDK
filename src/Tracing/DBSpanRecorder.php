@@ -7,8 +7,6 @@ use AllStak\Helpers\SecurityHelper;  // Adjust import
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use AllStak\Tracing\SpanContext;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\DB;
 
 class DBSpanRecorder
 {
@@ -40,7 +38,7 @@ class DBSpanRecorder
         try {
             self::$isRecording = true; // Set guard
 
-            Log::debug('DBSpanRecorder::record called', ['sql_preview' => substr($query->sql, 0, 100)]);  // Preview only
+            error_log('DBSpanRecorder::record called - sql_preview: ' . substr($query->sql, 0, 100));  // Preview only
 
             $traceId = SpanContext::getTraceId();
 
@@ -58,11 +56,7 @@ class DBSpanRecorder
             );
 
             // Log masking summary
-            Log::debug('DB Query Sent with Masking', [
-                'trace_id' => $traceId,
-                'masked_bindings_count' => count($maskedBindings),
-                'has_masking' => count(array_filter($maskedBindings, fn($b) => strpos((string)$b, '*') !== false)) > 0
-            ]);
+            error_log('DB Query Sent with Masking - trace_id: ' . $traceId . ', masked_bindings_count: ' . count($maskedBindings) . ', has_masking: ' . (count(array_filter($maskedBindings, fn($b) => strpos((string)$b, '*') !== false)) > 0 ? 'true' : 'false'));
 
         } finally {
             self::$isRecording = false; // Always reset guard
@@ -107,16 +101,10 @@ class DBSpanRecorder
                 stackTrace: $stackTrace
             );
 
-            Log::warning('Failed DB Query Recorded', [
-                'trace_id' => $traceId,
-                'error_code' => $errorCode,
-                'masked' => true
-            ]);
+            error_log('Failed DB Query Recorded - trace_id: ' . $traceId . ', error_code: ' . $errorCode . ', masked: true');
 
         } catch (\Exception $e) {
-            Log::error('Failed to record failed query', [
-                'error' => $e->getMessage()
-            ]);
+            error_log('Failed to record failed query - error: ' . $e->getMessage());
         } finally {
             self::$isRecording = false;
         }

@@ -15,11 +15,20 @@ class Version
 
     public static function getUserAgent(): string
     {
+        $laravelVersion = 'unknown';
+        if (function_exists('app') && function_exists('version')) {
+            try {
+                $laravelVersion = \app()->version();
+            } catch (\Exception $e) {
+                $laravelVersion = 'not-available';
+            }
+        }
+        
         return sprintf(
             'allstak-php/%s (PHP %s; Laravel %s)',
             self::get(),
             PHP_VERSION,
-            \app()->version()
+            $laravelVersion
         );
     }
 }

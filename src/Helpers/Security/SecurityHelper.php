@@ -91,7 +91,9 @@ class SecurityHelper
             // Mask sensitive data in code lines
             $maskedLine = $line;
             foreach (self::SENSITIVE_KEY_PATTERNS as $pattern) {
-                $maskedLine = preg_replace($pattern . '(\s*=\s*[\'"])[^\'"]+([\'"])', '$1******$2', $maskedLine);
+                // Extract the pattern without delimiters and modifiers
+                $cleanPattern = trim($pattern, '/i');
+                $maskedLine = preg_replace('/' . $cleanPattern . '(\s*=\s*[\'"])[^\'"]+([\'"])/i', '$1******$2', $maskedLine);
             }
             $maskedLines[$lineNumber] = $maskedLine;
         }
