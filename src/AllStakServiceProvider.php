@@ -60,7 +60,7 @@ class AllStakServiceProvider extends ServiceProvider
         ], 'allstak-config');
 
         // Register custom log channel
-        $this->app['log']->extend('allstak', function ($app, $config) {
+        Log::extend('allstak', function ($app, $config) {
             return (new AllStakLogChannel())($config);
         });
 
