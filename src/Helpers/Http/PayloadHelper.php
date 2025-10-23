@@ -68,7 +68,7 @@ class PayloadHelper
      * Sanitize string for JSON: Remove/escape control chars, ensure UTF-8, trim and limit length.
      * Prevents JSON parse errors (e.g., illegal CTRL-CHAR) and payload bloat.
      */
-    private function sanitizeString(?string $input): string
+    public function sanitizeString(?string $input): string
     {
         if ($input === null) {
             return '';
