@@ -28,7 +28,7 @@ class AllStakServiceProvider extends ServiceProvider
             $config = $app['config']['allstak'];
             return new AllStakClient(
                 $config['api_key'] ?? env('ALLSTAK_API_KEY', ''),
-                $config['environment'] ?? env('ALLSTAK_ENV', app()->environment()),
+                $config['environment'] ?? env('ALLSTAK_ENV', \app()->environment()),
                 $config['SEND_IP_ADDRESS'] ?? env('ALLSTAK_SEND_IP_ADDRESS', true),
                 $config['service_name'] ?? env('ALLSTAK_SERVICE_NAME', config('app.name'))
             );

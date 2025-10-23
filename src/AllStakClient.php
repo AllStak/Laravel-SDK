@@ -62,12 +62,7 @@ class AllStakClient
 
         // Validate API key and enable SDK
         if (empty($apiKey) || strlen($apiKey) < 10) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::warning('AllStak SDK disabled: Invalid or empty API key');
-            } else {
-                error_log('AllStak SDK disabled: Invalid or empty API key');
-            }
+            $this->safeLog('warning', 'AllStak SDK disabled: Invalid or empty API key');
             $this->enabled = false;
             return;
         }
@@ -100,12 +95,7 @@ class AllStakClient
     private function isAllowed(): bool
     {
         if (!$this->enabled) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::debug('AllStak SDK is disabled');
-            } else {
-                error_log('AllStak SDK is disabled');
-            }
+            $this->safeLog('debug', 'AllStak SDK is disabled');
             return false;
         }
         
@@ -138,7 +128,7 @@ class AllStakClient
 
         try {
             $traceId = $traceId ?? $this->generateTraceId();
-            $request = $request ?? request();
+            $request = $request ?? \request();
 
             $errorSeverity = $this->clientHelper->determineErrorSeverity($exception);
             $errorCategory = $this->clientHelper->determineErrorCategory($exception);
@@ -176,7 +166,7 @@ class AllStakClient
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
                 'tags' => $tags,  // FIXED: Encode if array (DTO: List<String> will parse JSON array)
 
                 // Additional context - FIXED: code_context as JSON string
@@ -320,7 +310,7 @@ class AllStakClient
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             // Use error_log if Laravel facades are not available
@@ -382,7 +372,7 @@ class AllStakClient
                 'parameters' => json_encode($bindings),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => request()->user()?->id ?? null,
+                'user_id' => \request()->user()?->id ?? null,
                 'connection_id' => $connectionName,
                 'is_success' => $success,
                 'is_slow' => $duration > 1000, // Slow if > 1 second
@@ -392,7 +382,7 @@ class AllStakClient
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             // ✅ Add error-specific fields when query fails
@@ -479,19 +469,19 @@ class AllStakClient
                 'function_name' => $caller['function'] ?? null,
                 'class_name' => $caller['class'] ?? null,
                 'framework_name' => 'laravel',
-                'framework_version' => app()->version(),
+                'framework_version' => \app()->version(),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => request()->user()?->id ?? null,
-                'session_id' => request()->session()?->getId(),
-                'request_id' => request()->header('X-Request-ID'),
+                'user_id' => \request()->user()?->id ?? null,
+                'session_id' => \request()->session()?->getId(),
+                'request_id' => \request()->header('X-Request-ID'),
                 'process_id' => getmypid(),
                 'hostname' => gethostname(),
                 'sdk_version' => self::SDK_VERSION,
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             // Use error_log if Laravel facades are not available
@@ -566,7 +556,7 @@ class AllStakClient
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             if ($span->error) {
@@ -633,7 +623,7 @@ class AllStakClient
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             // Use async transport (non-blocking)
@@ -672,6 +662,22 @@ class AllStakClient
     }
 
     /**
+     * Safely log messages, falling back to error_log if Laravel facades are not available
+     */
+    private function safeLog(string $level, string $message, array $context = []): void
+    {
+        try {
+            if (class_exists('\Illuminate\Support\Facades\Log') && \Illuminate\Support\Facades\Facade::getFacadeApplication()) {
+                Log::$level($message, $context);
+            } else {
+                error_log("AllStak [$level]: $message " . json_encode($context));
+            }
+        } catch (\Exception $e) {
+            error_log("AllStak [$level]: $message " . json_encode($context));
+        }
+    }
+
+    /**
      * Send a log message to AllStak backend
      */
     public function log(string $level, string $message, array $context = [], ?string $traceId = null): bool
@@ -691,16 +697,16 @@ class AllStakClient
                 'timestamp' => now()->toISOString(),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
-                'user_id' => request()->user()?->id ?? null,
-                'session_id' => request()->session()?->getId(),
-                'request_id' => request()->header('X-Request-ID'),
+                'user_id' => \request()->user()?->id ?? null,
+                'session_id' => \request()->session()?->getId(),
+                'request_id' => \request()->header('X-Request-ID'),
                 'process_id' => getmypid(),
                 'hostname' => gethostname(),
                 'sdk_version' => self::SDK_VERSION,
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
                 'php_version' => PHP_VERSION,
-                'laravel_version' => app()->version(),
+                'laravel_version' => \app()->version(),
             ];
 
             // Use async transport (non-blocking)
@@ -708,12 +714,7 @@ class AllStakClient
 
             return true;
         } catch (\Exception $e) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                Log::error('Failed to send log to AllStak: ' . $e->getMessage());
-            } else {
-                error_log('Failed to send log to AllStak: ' . $e->getMessage());
-            }
+            $this->safeLog('error', 'Failed to send log to AllStak: ' . $e->getMessage());
             return false;
         }
     }

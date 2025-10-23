@@ -19,7 +19,7 @@ class Version
             'allstak-php/%s (PHP %s; Laravel %s)',
             self::get(),
             PHP_VERSION,
-            app()->version()
+            \app()->version()
         );
     }
 }
