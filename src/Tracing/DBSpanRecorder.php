@@ -99,7 +99,7 @@ class DBSpanRecorder
                 queryText: $maskedQueryText,
                 bindings: $maskedBindings,
                 duration: 0, // Failed, no execution time
-                connectionName: $exception->getConnectionName() ?? config('database.default'),
+                connectionName: $exception->getConnectionName() ?? (function_exists('config') ? config('database.default') : 'default'),
                 traceId: $traceId,
                 success: false,
                 errorCode: (string)$errorCode,

@@ -76,10 +76,13 @@ class AllStakClient
 
         // Initialize async transport (only if enabled)
         if ($this->enabled) {
+            // Check if config function exists (Laravel environment)
+            $useCompression = function_exists('config') ? config('allstak.use_compression', true) : true;
+            
             $this->transport = new AsyncHttpTransport(
                 $this->httpClient,
                 $this->apiKey,
-                config('allstak.use_compression', true)
+                $useCompression
             );
         }
     }
@@ -192,7 +195,7 @@ class AllStakClient
                 // Database error (strings only - good)
                 'database_error' => $this->errorHelper->isDatabaseException($exception) ? [
                     'query_text' => $this->securityHelper->maskQueryText($this->errorHelper->extractQueryFromException($exception) ?? ''),  // Masked SQL
-                    'database_name' => config('database.connections.' . config('database.default') . '.database'),
+                    'database_name' => function_exists('config') ? config('database.connections.' . (function_exists('config') ? config('database.default') : 'mysql') . '.database') : 'unknown',
                     'constraint_violated' => $this->errorHelper->extractConstraintViolation($exception),
                     // Add masked bindings as JSON (for backend parsing) - only if method exists
                     'masked_parameters' => json_encode($this->securityHelper->maskDbParameters(
@@ -321,7 +324,7 @@ class AllStakClient
                 'query_text' => $queryText,
                 'query_hash' => md5($queryText),
                 'query_type' => $this->dataTransformHelper->extractQueryType($queryText),
-                'database_name' => config("database.connections.{$connectionName}.database"),
+                'database_name' => function_exists('config') ? config("database.connections.{$connectionName}.database") : $connectionName,
                 'table_name' => $this->dataTransformHelper->extractTableName($queryText),
                 'execution_time' => (int)$duration, // milliseconds
                 'rows_affected' => null, // Should be provided from query result

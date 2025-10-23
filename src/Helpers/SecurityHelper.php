@@ -288,7 +288,7 @@ class SecurityHelper
                 $masked[] = $maskedParam;
 
                 // Optional: Log masking for dev (disable in prod)
-                if ($maskedParam !== $original && config('app.debug')) {
+                if ($maskedParam !== $original && function_exists('config') && config('app.debug')) {
                     Log::debug('DB Parameter Masked', [
                         'original_preview' => substr($original, 0, 10) . '...',  // No full log
                         'masked' => $maskedParam,
@@ -365,7 +365,7 @@ class SecurityHelper
         }, $query);
 
         // Log preview for debug (no full query)
-        if (config('app.debug')) {
+        if (function_exists('config') && config('app.debug')) {
             Log::debug('SQL Query Masked', ['preview' => substr($query, 0, 100) . '...']);
         }
 
