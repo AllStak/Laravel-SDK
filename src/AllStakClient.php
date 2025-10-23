@@ -3,12 +3,16 @@
 namespace AllStak;
 
 use AllStak\Helpers\ClientHelper;
-use AllStak\Helpers\SecurityHelper;
+use AllStak\Helpers\Security\SecurityHelper;
+use AllStak\Helpers\Utils\RateLimitingHelper;
+use AllStak\Helpers\Utils\TracingHelper;
+use AllStak\Helpers\Utils\ErrorHelper;
+use AllStak\Helpers\Utils\DataTransformHelper;
+use AllStak\Helpers\Http\PayloadHelper;
 use AllStak\Tracing\Span;
 use AllStak\Tracing\SpanContext;
 use AllStak\Transport\AsyncHttpTransport;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\app;
 use Psr\Log\LoggerInterface;
@@ -20,8 +24,6 @@ use Illuminate\Contracts\Cache\Repository;
 class AllStakClient
 {
     private const API_URL = 'http://localhost:8080/api/sdk/v2';
-    private const MAX_ATTEMPTS = 100;
-    private const DECAY_SECONDS = 60; // 1 minute window
     const SDK_VERSION = "2.0.0";
 
     private string $apiKey;
@@ -31,10 +33,13 @@ class AllStakClient
     private SecurityHelper $securityHelper;
     private ClientHelper $clientHelper;
     private string $serviceName;
-    private array $activeSpans = [];
     private ?AsyncHttpTransport $transport = null;
     private bool $enabled = true;
-    private string $rateLimitKey;
+    private RateLimitingHelper $rateLimitingHelper;
+    private TracingHelper $tracingHelper;
+    private ErrorHelper $errorHelper;
+    private DataTransformHelper $dataTransformHelper;
+    private PayloadHelper $payloadHelper;
 
     public function __construct(
         string $apiKey,
@@ -46,7 +51,6 @@ class AllStakClient
         $this->environment = $environment;
         $this->sendIpAddress = $sendIpAddress;
         $this->serviceName = $serviceName;
-        $this->rateLimitKey = 'allstak:' . md5($apiKey); // Unique per API key
 
         // Validate API key and enable SDK
         if (empty($apiKey) || strlen($apiKey) < 10) {
@@ -72,6 +76,11 @@ class AllStakClient
 
         $this->securityHelper = new SecurityHelper();
         $this->clientHelper = new ClientHelper($this->securityHelper);
+        $this->rateLimitingHelper = new RateLimitingHelper($apiKey);
+        $this->tracingHelper = new TracingHelper();
+        $this->errorHelper = new ErrorHelper();
+        $this->dataTransformHelper = new DataTransformHelper();
+        $this->payloadHelper = new PayloadHelper($this->securityHelper);
     }
 
     /**
@@ -82,33 +91,7 @@ class AllStakClient
         if (!$this->enabled) {
             return false;
         }
-        return !$this->shouldThrottle();
-    }
-
-    /**
-     * Simple cache-based rate limiting (replaces broken RateLimiter facade usage)
-     */
-    private function shouldThrottle(): bool
-    {
-        try {
-            $attempts = Cache::get($this->rateLimitKey, 0);
-
-            if ($attempts >= self::MAX_ATTEMPTS) {
-                Log::debug('AllStak rate limit exceeded', ['attempts' => $attempts]);
-                return true;
-            }
-
-            // Increment attempts
-            Cache::put($this->rateLimitKey, $attempts + 1, self::DECAY_SECONDS);
-
-            Log::debug('AllStak rate limit check', ['attempts' => $attempts + 1]);
-            return false;
-        } catch (\Exception $e) {
-            Log::warning('AllStak rate limiting failed, proceeding without limit', [
-                'error' => $e->getMessage()
-            ]);
-            return false; // Fail open to avoid blocking
-        }
+        return !$this->rateLimitingHelper->shouldThrottle();
     }
 
     /**
@@ -116,7 +99,7 @@ class AllStakClient
      */
     public function generateTraceId(): string
     {
-        return bin2hex(random_bytes(16));
+        return $this->tracingHelper->generateTraceId();
     }
 
     /**
@@ -147,19 +130,19 @@ class AllStakClient
             $maskedMessage = $securityHelper->maskExceptionMessage($rawMessage, $exception);  // New helper below
             // FIXED: json_encode array fields that DTO expects as String (e.g., code_context, tags if nested)
             $maskedCodeContextJson = json_encode($maskedCodeContext);  // Now a JSON string
-            $tags = $this->extractTags($exception);
+            $tags = $this->errorHelper->extractTags($exception);
 
             // Main error_logs payload
             $payload = [
                 'trace_id' => $traceId,
                 'timestamp' => now()->toIso8601String(),
-                'error_type' => $this->mapErrorType($errorCategory),
-                'error_code' => $this->generateErrorCode($exception),
-                'error_message' => $this->sanitizeString($maskedMessage),  // Now masked + sanitized
+                'error_type' => $this->errorHelper->mapErrorType($errorCategory),
+                'error_code' => $this->errorHelper->generateErrorCode($exception),
+                'error_message' => $this->payloadHelper->sanitizeString($maskedMessage),  // Now masked + sanitized
                 'error_class' => get_class($exception),
                 'severity' => $errorSeverity,
                 'status' => 'new',
-                'stack_trace' => $this->sanitizeString($exception->getTraceAsString()),  // From earlier sanitization
+                'stack_trace' => $this->payloadHelper->sanitizeString($exception->getTraceAsString()),  // From earlier sanitization
                 'source' => 'SDK',
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
@@ -174,7 +157,7 @@ class AllStakClient
 
                 // Additional context - FIXED: code_context as JSON string
                 'additional_data' => [
-                    'file' => $this->sanitizeString($exception->getFile()),
+                    'file' => $this->payloadHelper->sanitizeString($exception->getFile()),
                     'line' => $exception->getLine(),
                     'hostname' => gethostname(),
                     'code_context' => $maskedCodeContextJson,  // Now string: "[\"masked line1\", ...]"
@@ -182,11 +165,11 @@ class AllStakClient
                 ],
 
                 // HTTP error details (already has json_encode for headers/body - good)
-                'http_error' => $this->isHttpException($exception) ? [
+                'http_error' => $this->errorHelper->isHttpException($exception) ? [
                     'http_method' => $request->method(),
                     'http_url' => $this->securityHelper->sanitizeUrl($request->fullUrl()),
                     'http_path' => $request->path(),
-                    'http_status_code' => $this->getHttpStatusCode($exception),
+                    'http_status_code' => $this->errorHelper->getHttpStatusCode($exception),
                     'http_duration' => null,
                     'user_agent' => $request->userAgent() ?? 'unknown',
                     'referer' => $request->header('referer'),
@@ -194,25 +177,25 @@ class AllStakClient
                     'request_body' => json_encode($this->clientHelper->transformRequestBody($request->all())),
                     'response_headers' => null,  // If array later, json_encode
                     'response_body' => null,  // If content, truncate + json_encode if object
-                    'is_client_error' => $this->isClientError($exception),
-                    'is_server_error' => $this->isServerError($exception),
+                    'is_client_error' => $this->errorHelper->isClientError($exception),
+                    'is_server_error' => $this->errorHelper->isServerError($exception),
                 ] : null,
 
                 // Database error (strings only - good)
-                'database_error' => $this->isDatabaseException($exception) ? [
+                'database_error' => $this->errorHelper->isDatabaseException($exception) ? [
                     'query_text' => $this->securityHelper->maskQueryText($exception->getSql() ?? ''),  // Masked SQL
                     'database_name' => config('database.connections.' . config('database.default') . '.database'),
-                    'constraint_violated' => $this->extractConstraintViolation($exception),
+                    'constraint_violated' => $this->errorHelper->extractConstraintViolation($exception),
                     // Add masked bindings as JSON (for backend parsing)
                     'masked_parameters' => json_encode($this->securityHelper->maskDbParameters($exception->getBindings() ?? [])),
                 ] : null,
 
                 // Application error (strings/ints - good)
                 'application_error' => [
-                    'file_path' => $this->sanitizeString($exception->getFile()),
+                    'file_path' => $this->payloadHelper->sanitizeString($exception->getFile()),
                     'line_number' => $exception->getLine(),
-                    'function_name' => $this->sanitizeString($this->extractFunctionName($exception)),
-                    'class_name' => $this->sanitizeString($this->extractClassName($exception)),
+                    'function_name' => $this->payloadHelper->sanitizeString($this->errorHelper->extractFunctionName($exception)),
+                    'class_name' => $this->payloadHelper->sanitizeString($this->errorHelper->extractClassName($exception)),
                     'exception_type' => get_class($exception),
                     'is_handled' => true,
                 ],
@@ -224,7 +207,7 @@ class AllStakClient
                 'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
                 'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
             ]);
-            $payload = $this->sanitizePayload($payload);
+            $payload = $this->payloadHelper->sanitizePayload($payload);
             $this->transport->send(self::API_URL . '/errors', $payload);
 
             return true;
@@ -239,7 +222,7 @@ class AllStakClient
      */
     public function captureRequest(
         Request $request,
-                $response,
+        $response,
         float $duration,
         ?string $traceId = null
     ): bool {
@@ -266,8 +249,8 @@ class AllStakClient
                 'request_headers' => json_encode($this->clientHelper->transformHeaders($request->headers->all())),
                 'request_body' => json_encode($this->clientHelper->transformRequestBody($request->all())),
                 'response_headers' => method_exists($response, 'headers') ? json_encode($response->headers->all()) : null,
-                'response_body' => $this->getResponseBody($response),
-                'response_size' => $this->getResponseSize($response),
+                'response_body' => $this->dataTransformHelper->getResponseBody($response),
+                'response_size' => $this->dataTransformHelper->getResponseSize($response),
                 'service_name' => $this->serviceName,
                 'environment' => $this->environment,
                 'user_id' => $request->user()?->id ?? null,
@@ -320,9 +303,9 @@ class AllStakClient
                 'timestamp' => now()->toIso8601String(),
                 'query_text' => $queryText,
                 'query_hash' => md5($queryText),
-                'query_type' => $this->extractQueryType($queryText),
+                'query_type' => $this->dataTransformHelper->extractQueryType($queryText),
                 'database_name' => config("database.connections.{$connectionName}.database"),
-                'table_name' => $this->extractTableName($queryText),
+                'table_name' => $this->dataTransformHelper->extractTableName($queryText),
                 'execution_time' => (int)$duration, // milliseconds
                 'rows_affected' => null, // Should be provided from query result
                 'rows_examined' => null,
@@ -565,238 +548,6 @@ class AllStakClient
     }
 
     // Helper methods (unchanged)
-
-    private function mapErrorType(string $category): string
-    {
-        return match($category) {
-            'DATABASE_ERROR' => 'DatabaseError',
-            'NETWORK_ERROR' => 'HttpError',
-            'SECURITY_ERROR' => 'ApplicationError',
-            'PERFORMANCE_ERROR' => 'ApplicationError',
-            default => 'ApplicationError',
-        };
-    }
-
-    private function generateErrorCode(Throwable $exception): string
-    {
-        return 'E' . substr(md5(get_class($exception)), 0, 6);
-    }
-
-    private function extractTags(Throwable $exception): array
-    {
-        $tags = [];
-        $message = strtolower($exception->getMessage());
-
-        if (str_contains($message, 'payment')) $tags[] = 'payment';
-        if (str_contains($message, 'auth')) $tags[] = 'authentication';
-        if (str_contains($message, 'database')) $tags[] = 'database';
-        if (str_contains($message, 'validation')) $tags[] = 'validation';
-
-        return $tags;
-    }
-
-    private function isHttpException(Throwable $exception): bool
-    {
-        return $exception instanceof \Symfony\Component\HttpKernel\Exception\HttpException;
-    }
-
-    private function getHttpStatusCode(Throwable $exception): int
-    {
-        if (method_exists($exception, 'getStatusCode')) {
-            return $exception->getStatusCode();
-        }
-        return 500;
-    }
-
-    private function isClientError(Throwable $exception): bool
-    {
-        $code = $this->getHttpStatusCode($exception);
-        return $code >= 400 && $code < 500;
-    }
-
-    private function isServerError(Throwable $exception): bool
-    {
-        $code = $this->getHttpStatusCode($exception);
-        return $code >= 500;
-    }
-
-    private function isDatabaseException(Throwable $exception): bool
-    {
-        return $exception instanceof \PDOException ||
-            $exception instanceof \Illuminate\Database\QueryException;
-    }
-
-    private function extractQueryFromException(Throwable $exception): ?string
-    {
-        if (method_exists($exception, 'getSql')) {
-            return $exception->getSql();
-        }
-        return null;
-    }
-
-    private function extractConstraintViolation(Throwable $exception): ?string
-    {
-        $message = $exception->getMessage();
-        if (preg_match('/Integrity constraint violation: (.+?)\\n/', $message, $matches)) {
-            return $matches[1];
-        }
-        return null;
-    }
-
-    private function extractFunctionName(Throwable $exception): ?string
-    {
-        $trace = $exception->getTrace();
-        return $trace[0]['function'] ?? null;
-    }
-
-    private function extractClassName(Throwable $exception): ?string
-    {
-        $trace = $exception->getTrace();
-        return $trace[0]['class'] ?? null;
-    }
-
-    private function extractQueryType(string $query): string
-    {
-        $query = trim(strtoupper($query));
-        if (str_starts_with($query, 'SELECT')) return 'SELECT';
-        if (str_starts_with($query, 'INSERT')) return 'INSERT';
-        if (str_starts_with($query, 'UPDATE')) return 'UPDATE';
-        if (str_starts_with($query, 'DELETE')) return 'DELETE';
-        return 'OTHER';
-    }
-
-    /**
-     * Extract all table names from query (useful for JOIN queries)
-     * Returns array of table names
-     */
-    private function extractAllTableNames(string $query): array
-    {
-        $query = preg_replace('/\s+/', ' ', trim($query));
-        $tables = [];
-
-        // Universal pattern for all DB engines
-        // Matches: `table`, "table", [table], table with optional schema
-        $pattern = '/(?:FROM|JOIN)\s+(?:[`"\[]?(?:\w+)[`"\]]?\.)?[`"\[]?(\w+)[`"\]]?/i';
-
-        if (preg_match_all($pattern, $query, $matches)) {
-            $tables = array_unique($matches[1]);
-        }
-
-        // Fallback for INSERT/UPDATE/DELETE
-        if (empty($tables)) {
-            $singlePattern = '/(?:INTO|UPDATE)\s+(?:[`"\[]?(?:\w+)[`"\]]?\.)?[`"\[]?(\w+)[`"\]]?/i';
-            if (preg_match($singlePattern, $query, $matches)) {
-                $tables[] = $matches[1];
-            }
-        }
-
-        return array_values($tables);
-    }
-
-    /**
-     * Get primary table (first table in query)
-     */
-    private function extractTableName(string $query): ?string
-    {
-        $tables = $this->extractAllTableNames($query);
-        return !empty($tables) ? $tables[0] : 'unknown';
-    }
-
-    private function getResponseBody($response): ?string
-    {
-        if (method_exists($response, 'getContent')) {
-            $content = $response->getContent();
-            return strlen($content) > 10000 ? substr($content, 0, 10000) . '...' : $content;
-        }
-        return null;
-    }
-
-    private function getResponseSize($response): ?int
-    {
-        if (method_exists($response, 'getContent')) {
-            return strlen($response->getContent());
-        }
-        return null;
-    }
-
-    /**
-     * Sanitize payload: Encode arrays/objects to JSON strings for String DTO fields;
-     * Apply string sanitization; Limit sizes
-     */
-    private function sanitizePayload(array $payload): array
-    {
-        // Fields that should STAY as arrays (not be JSON-encoded)
-        $keepAsArray = ['tags', 'breadcrumbs', 'contexts'];
-
-        // Fields that are nested objects to recurse into
-        $nestedObjects = ['database_error', 'additional_data', 'http_error', 'application_error'];
-
-        foreach ($payload as $key => $value) {
-            if (is_array($value)) {
-                // Check if this should stay as an array
-                if (in_array($key, $keepAsArray)) {
-                    // Keep as array, just sanitize string values inside
-                    $payload[$key] = array_map(function($item) {
-                        return is_string($item) ? $this->sanitizeString($item) : $item;
-                    }, $value);
-                }
-                // Recurse into nested objects
-                elseif (in_array($key, $nestedObjects)) {
-                    $payload[$key] = $this->sanitizePayload($value);
-                }
-                // Otherwise, encode to JSON string (for fields already intended as JSON)
-                else {
-                    $payload[$key] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-                }
-            }
-            elseif (is_object($value)) {
-                $payload[$key] = $this->sanitizePayload((array) $value);
-            }
-            elseif (is_string($value)) {
-                // FIXED: For DB fields, extra mask if SQL-like
-                if (strpos($value, 'SELECT') !== false || strpos($value, 'INSERT') !== false) {
-                    $payload[$key] = $this->securityHelper->maskQueryText($value);
-                } else {
-                    $payload[$key] = $this->sanitizeString($value);
-                }
-                // Truncate long strings (e.g., stack_trace)
-                $payload[$key] = substr($payload[$key], 0, 10000);
-            }
-            elseif (is_numeric($value) && $key === 'memory_usage') {
-                $payload[$key] = min($value, 1073741824);  // Cap 1GB
-            }
-        }
-
-        return $payload;
-    }
-
-
-    /**
-     * Sanitize string for JSON: Remove/escape control chars, ensure UTF-8, trim and limit length.
-     * Prevents JSON parse errors (e.g., illegal CTRL-CHAR) and payload bloat.
-     *
-     * @param ?string $input The input string (nullable).
-     * @return string Sanitized string (empty if null).
-     */
-    private function sanitizeString(?string $input): string
-    {
-        if ($input === null) {
-            return '';
-        }
-
-        // Remove control chars (0-31, 127) except allowed whitespace (\t=9, \n=10, \r=13)
-        $input = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $input);
-
-        // Ensure UTF-8 encoding (fix any encoding issues from sources like DB/files)
-        $input = mb_convert_encoding($input, 'UTF-8', 'UTF-8');
-
-        // Trim whitespace and limit length to prevent huge payloads (e.g., long stack traces)
-        $input = trim(substr($input, 0, 10000)); // Max 10KB per field; adjust if needed
-
-        return $input;
-    }
-
-
 
     /**
      * Destructor ensures pending requests are flushed
