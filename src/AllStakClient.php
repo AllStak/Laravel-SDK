@@ -7,7 +7,6 @@ use AllStak\Helpers\Utils\ErrorHelper;
 use AllStak\Helpers\Http\PayloadHelper;
 use AllStak\Helpers\Security\SecurityHelper;
 use AllStak\Helpers\Utils\TracingHelper;
-use AllStak\Helpers\Utils\RateLimitingHelper;
 use AllStak\Helpers\Utils\DataTransformHelper;
 use AllStak\Transport\AsyncHttpTransport;
 use AllStak\Tracing\Span;
@@ -35,7 +34,7 @@ class AllStakClient
     private string $serviceName;
     private ?AsyncHttpTransport $transport = null;
     private bool $enabled = true;
-    private RateLimitingHelper $rateLimitingHelper;
+    // Rate limiting removed - logs always sent
     private TracingHelper $tracingHelper;
     private ErrorHelper $errorHelper;
     private DataTransformHelper $dataTransformHelper;
@@ -55,7 +54,7 @@ class AllStakClient
         // Initialize helper objects first (always needed)
         $this->securityHelper = new SecurityHelper();
         $this->clientHelper = new ClientHelper($this->securityHelper);
-        $this->rateLimitingHelper = new RateLimitingHelper($apiKey);
+        // Rate limiting removed - logs always sent
         $this->tracingHelper = new TracingHelper();
         $this->errorHelper = new ErrorHelper();
         $this->dataTransformHelper = new DataTransformHelper();
@@ -63,7 +62,12 @@ class AllStakClient
 
         // Validate API key and enable SDK
         if (empty($apiKey) || strlen($apiKey) < 10) {
-            Log::warning('AllStak SDK disabled: Invalid or empty API key');
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::warning('AllStak SDK disabled: Invalid or empty API key');
+            } else {
+                error_log('AllStak SDK disabled: Invalid or empty API key');
+            }
             $this->enabled = false;
             return;
         }
@@ -91,21 +95,22 @@ class AllStakClient
     }
 
     /**
-     * Check if SDK is enabled and rate limit allows
+     * Check if SDK is enabled (rate limiting removed - always send logs)
      */
     private function isAllowed(): bool
     {
         if (!$this->enabled) {
-            Log::debug('AllStak SDK is disabled');
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak SDK is disabled');
+            } else {
+                error_log('AllStak SDK is disabled');
+            }
             return false;
         }
         
-        $shouldThrottle = $this->rateLimitingHelper->shouldThrottle();
-        if ($shouldThrottle) {
-            Log::debug('AllStak rate limit exceeded');
-        }
-        
-        return !$shouldThrottle;
+        // Rate limiting removed - always allow logs to be sent
+        return true;
     }
 
     /**
@@ -122,7 +127,12 @@ class AllStakClient
     public function captureException(Throwable $exception, ?Request $request = null, ?string $traceId = null): bool
     {
         if (!$this->isAllowed()) {
-            Log::debug('AllStak captureException blocked - SDK disabled or rate limited');
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak captureException blocked - SDK disabled or rate limited');
+            } else {
+                error_log('AllStak captureException blocked - SDK disabled or rate limited');
+            }
             return false;
         }
 
@@ -219,24 +229,44 @@ class AllStakClient
             ];
 
             // FIXED: Sanitize/encode full payload before sending
-            Log::debug('AllStak Exception Payload prepared', [
-                'trace_id' => $traceId,
-                'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
-                'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
-            ]);
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak Exception Payload prepared', [
+                    'trace_id' => $traceId,
+                    'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
+                    'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
+                ]);
+            } else {
+                error_log('AllStak Exception Payload prepared - trace_id: ' . $traceId);
+            }
             $payload = $this->payloadHelper->sanitizePayload($payload);
             
             if ($this->transport) {
                 $this->transport->send(self::API_URL . '/errors', $payload);
-                Log::debug('AllStak Exception sent successfully', ['trace_id' => $traceId]);
+                // Use error_log if Laravel facades are not available
+                if (class_exists('\Illuminate\Support\Facades\Log')) {
+                    Log::debug('AllStak Exception sent successfully', ['trace_id' => $traceId]);
+                } else {
+                    error_log('AllStak Exception sent successfully - trace_id: ' . $traceId);
+                }
             } else {
-                Log::error('AllStak transport not initialized');
+                // Use error_log if Laravel facades are not available
+                if (class_exists('\Illuminate\Support\Facades\Log')) {
+                    Log::error('AllStak transport not initialized');
+                } else {
+                    error_log('AllStak transport not initialized');
+                }
                 return false;
             }
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send error to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send error to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send error to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -251,7 +281,12 @@ class AllStakClient
         ?string $traceId = null
     ): bool {
         if (!$this->isAllowed()) {
-            Log::warning('AllStak rate limit exceeded or SDK disabled');
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::warning('AllStak rate limit exceeded or SDK disabled');
+            } else {
+                error_log('AllStak rate limit exceeded or SDK disabled');
+            }
             return false;
         }
 
@@ -288,14 +323,24 @@ class AllStakClient
                 'laravel_version' => app()->version(),
             ];
 
-            Log::debug('AllStak HTTP Request Payload', ['payload' => $payload]);
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak HTTP Request Payload', ['payload' => $payload]);
+            } else {
+                error_log('AllStak HTTP Request Payload sent');
+            }
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/http-logs', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send request to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send request to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send request to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -361,25 +406,40 @@ class AllStakClient
                     $payload['stack_trace'] = $stackTrace;
                 }
 
-                Log::debug('AllStak DB Query Failed', [
-                    'trace_id' => $traceId,
-                    'error_code' => $errorCode,
-                    'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
-                ]);
+                // Use error_log if Laravel facades are not available
+                if (class_exists('\Illuminate\Support\Facades\Log')) {
+                    Log::debug('AllStak DB Query Failed', [
+                        'trace_id' => $traceId,
+                        'error_code' => $errorCode,
+                        'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
+                    ]);
+                } else {
+                    error_log('AllStak DB Query Failed - trace_id: ' . $traceId . ', error_code: ' . $errorCode);
+                }
             }
 
-            Log::debug('AllStak DB Query Payload', [
-                'trace_id' => $traceId,
-                'success' => $success,
-                'query_type' => $payload['query_type']
-            ]);
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak DB Query Payload', [
+                    'trace_id' => $traceId,
+                    'success' => $success,
+                    'query_type' => $payload['query_type']
+                ]);
+            } else {
+                error_log('AllStak DB Query Payload sent - trace_id: ' . $traceId . ', success: ' . ($success ? 'true' : 'false'));
+            }
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/db-queries', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send DB query to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send DB query to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send DB query to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -434,14 +494,24 @@ class AllStakClient
                 'laravel_version' => app()->version(),
             ];
 
-            Log::debug('AllStak Framework Log Payload', ['payload' => $payload]);
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::debug('AllStak Framework Log Payload', ['payload' => $payload]);
+            } else {
+                error_log('AllStak Framework Log Payload sent - trace_id: ' . $payload['trace_id']);
+            }
 
             // Use async transport (non-blocking)
             $this->transport->send(self::API_URL . '/framework-logs', $payload);
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send framework log to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send framework log to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send framework log to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -467,8 +537,13 @@ class AllStakClient
      */
     public function endSpan(Span $span): bool
     {
-        if (!$this->isAllowed()) {
-            Log::warning('AllStak rate limit exceeded or SDK disabled for span');
+        if (!$this->enabled) {
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::warning('AllStak SDK disabled for span');
+            } else {
+                error_log('AllStak SDK disabled for span');
+            }
             return false;
         }
 
@@ -504,7 +579,12 @@ class AllStakClient
             unset($this->activeSpans[$span->id]);
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send span: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send span: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send span: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -524,8 +604,13 @@ class AllStakClient
      */
     public function addSpan(string $name, float $startTime, float $endTime, array $attributes = []): bool
     {
-        if (!$this->isAllowed()) {
-            Log::warning('AllStak rate limit exceeded or SDK disabled for span');
+        if (!$this->enabled) {
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::warning('AllStak SDK disabled for span');
+            } else {
+                error_log('AllStak SDK disabled for span');
+            }
             return false;
         }
 
@@ -556,7 +641,12 @@ class AllStakClient
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send span to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send span to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send span to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
@@ -618,7 +708,12 @@ class AllStakClient
 
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to send log to AllStak: ' . $e->getMessage());
+            // Use error_log if Laravel facades are not available
+            if (class_exists('\Illuminate\Support\Facades\Log')) {
+                Log::error('Failed to send log to AllStak: ' . $e->getMessage());
+            } else {
+                error_log('Failed to send log to AllStak: ' . $e->getMessage());
+            }
             return false;
         }
     }
