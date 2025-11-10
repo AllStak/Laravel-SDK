@@ -39,6 +39,7 @@ class AllStakClient
     private ErrorHelper $errorHelper;
     private DataTransformHelper $dataTransformHelper;
     private PayloadHelper $payloadHelper;
+    private array $activeSpans = []; // Track active spans for distributed tracing
 
     public function __construct(
         string $apiKey,
@@ -278,10 +279,10 @@ class AllStakClient
                 'timestamp' => (new \DateTime())->format('c'),
                 'ip' => method_exists($request, 'ip') ? ($this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip())) : 'unknown',
                 'http_method' => method_exists($request, 'method') ? $request->method() : 'unknown',
-                'http_url' => method_exists($request, 'fullUrl') ? $this->securityHelper->sanitizeUrl($request->fullUrl()) : 'unknown',
+                'url' => method_exists($request, 'fullUrl') ? $this->securityHelper->sanitizeUrl($request->fullUrl()) : 'unknown',
                 'http_path' => method_exists($request, 'path') ? $request->path() : 'unknown',
-                'http_status_code' => $statusCode,
-                'http_duration' => (int)($duration * 1000), // Convert to milliseconds
+                'status_code' => $statusCode,
+                'duration_ms' => (int)($duration * 1000), // Convert to milliseconds
                 'user_agent' => method_exists($request, 'userAgent') ? ($request->userAgent() ?? 'unknown') : 'unknown',
                 'referer' => method_exists($request, 'header') ? $request->header('referer') : null,
                 'request_headers' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null ? json_encode($this->clientHelper->transformHeaders($request->headers->all())) : '[]',
@@ -293,8 +294,8 @@ class AllStakClient
                 'environment' => $this->environment,
                 'user_id' => method_exists($request, 'user') ? ($request->user()?->id ?? null) : null,
                 'session_id' => method_exists($request, 'session') ? ($request->session()?->getId()) : null,
-                'is_success' => $statusCode >= 200 && $statusCode < 400,
-                'is_cached' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null && is_object($request->headers) && method_exists($request->headers, 'has') ? $request->headers->has('X-Cache-Hit') : false,
+                'success' => $statusCode >= 200 && $statusCode < 400,
+                'cached' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null && is_object($request->headers) && method_exists($request->headers, 'has') ? $request->headers->has('X-Cache-Hit') : false,
                 'sdk_version' => self::SDK_VERSION,
                 'sdk_language' => 'php',
                 'sdk_platform' => 'laravel',
@@ -351,7 +352,7 @@ class AllStakClient
             $payload = [
                 'trace_id' => $traceId,
                 'timestamp' => (new \DateTime())->format('c'),
-                'query_text' => $queryText,
+                'query' => $queryText,
                 'query_hash' => md5($queryText),
                 'query_type' => $this->dataTransformHelper->extractQueryType($queryText),
                 'database_name' => (function_exists('app') && app()->bound('config')) ? config("database.connections.{$connectionName}.database") : $connectionName,
@@ -433,13 +434,13 @@ class AllStakClient
             $payload = [
                 'trace_id' => $traceId,
                 'timestamp' => (new \DateTime())->format('c'),
-                'log_level' => strtoupper($level),
+                'level' => strtoupper($level),
                 'logger_name' => $context['logger'] ?? 'default',
                 'message' => $message,
                 'context' => json_encode($context),
-                'exception_type' => $context['exception'] ? get_class($context['exception']) : null,
-                'exception_message' => $context['exception']?->getMessage(),
-                'stack_trace' => $context['exception']?->getTraceAsString(),
+                'exception_type' => isset($context['exception']) && $context['exception'] ? get_class($context['exception']) : null,
+                'exception_message' => isset($context['exception']) && $context['exception'] ? $context['exception']->getMessage() : null,
+                'stack_trace' => isset($context['exception']) && $context['exception'] ? $context['exception']->getTraceAsString() : null,
                 'file_path' => $caller['file'] ?? null,
                 'line_number' => $caller['line'] ?? null,
                 'function_name' => $caller['function'] ?? null,
