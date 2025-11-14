@@ -1,6 +1,7 @@
 {
     "name": "allstak/laravel-sdk",
-    "description": "Official Laravel SDK for AllStak error tracking and monitoring",
+    "description": "Official Laravel SDK for AllStak Observability Platform - Automatic error tracking, performance monitoring, and distributed tracing",
+    "version": "2.0.0",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -10,7 +11,10 @@
         "logging",
         "allstak",
         "observability",
-        "tracing"
+        "tracing",
+        "performance",
+        "distributed-tracing",
+        "opentelemetry"
     ],
     "homepage": "https://allstak.io",
     "autoload": {
@@ -25,7 +29,7 @@
         }
     ],
     "require": {
-        "php": ">=7.2 <9.0",
+        "php": ">=7.4 <9.0",
         "illuminate/support": "^5.0 || ^6.0 || ^7.0 || ^8.0 || ^9.0 || ^10.0 || ^11.0 || ^12.0",
         "symfony/http-client": "^4.4 || ^5.4 || ^6.0 || ^7.0",
         "monolog/monolog": "^1.25 || ^2.0 || ^3.0",

@@ -2,749 +2,646 @@
 
 namespace AllStak;
 
-use AllStak\Helpers\ClientHelper;
-use AllStak\Helpers\Utils\ErrorHelper;
-use AllStak\Helpers\Http\PayloadHelper;
-use AllStak\Helpers\Security\SecurityHelper;
-use AllStak\Helpers\Utils\TracingHelper;
-use AllStak\Helpers\Utils\DataTransformHelper;
+use AllStak\DTO\ObservabilityHttpRequestDto;
+use AllStak\DTO\ObservabilityErrorEventDto;
+use AllStak\DTO\ObservabilityApplicationLogDto;
+use AllStak\DTO\ObservabilityDatabaseQueryDto;
+use AllStak\DTO\ObservabilitySpanDto;
+use AllStak\DTO\TelemetryBatchDto;
+use AllStak\Helpers\IdGenerator;
 use AllStak\Transport\AsyncHttpTransport;
-use AllStak\Tracing\Span;
 use AllStak\Tracing\SpanContext;
-use Throwable;
-use Symfony\Contracts\HttpClient\HttpClientInterface;
-use Symfony\Component\HttpClient\HttpClient;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\app;
-use Psr\Log\LoggerInterface;
-use Illuminate\Contracts\Cache\Repository;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Throwable;
 
 class AllStakClient
 {
-    private const API_URL = 'http://localhost:8080/api/sdk/v2';
     const SDK_VERSION = "2.0.0";
+    const SDK_LANGUAGE = "php";
+    const SDK_PLATFORM = "laravel";
 
     private string $apiKey;
+    private string $projectId;
     private string $environment;
-    private bool $sendIpAddress;
+    private string $endpoint;
+    private bool $enabled;
+
+    // Feature flags
+    private bool $captureHttp;
+    private bool $captureErrors;
+    private bool $captureLogs;
+    private bool $captureDatabase;
+
+    // Performance settings
+    private float $sampleRate;
+    private int $batchSize;
+    private int $flushInterval;
+
+    // Privacy settings
+    private bool $sendClientIp;
+    private bool $anonymizeIp;
+    private array $scrubHeaders;
+
+    // Context
+    private array $tags;
+
+    // Internal
     private ?HttpClientInterface $httpClient = null;
-    private SecurityHelper $securityHelper;
-    private ClientHelper $clientHelper;
-    private string $serviceName;
     private ?AsyncHttpTransport $transport = null;
-    private bool $enabled = true;
-    // Rate limiting removed - logs always sent
-    private TracingHelper $tracingHelper;
-    private ErrorHelper $errorHelper;
-    private DataTransformHelper $dataTransformHelper;
-    private PayloadHelper $payloadHelper;
-    private array $activeSpans = []; // Track active spans for distributed tracing
+    private TelemetryBatchDto $batch;
+    private float $lastFlush;
+    private array $activeSpans = [];
 
-    public function __construct(
-        string $apiKey,
-        string $environment = 'production',
-        bool $sendIpAddress = true,
-        string $serviceName = 'laravel-app'
-    ) {
-        $this->apiKey = $apiKey;
-        $this->environment = $environment;
-        $this->sendIpAddress = $sendIpAddress;
-        $this->serviceName = $serviceName;
+    /**
+     * Safely get config value (works in both standalone and Laravel contexts)
+     */
+    private function getConfig(string $key, $default = null)
+    {
+        if (function_exists('config')) {
+            try {
+                return config($key, $default);
+            } catch (\Exception $e) {
+                return $default;
+            }
+        }
+        return $default;
+    }
 
-        // Initialize helper objects first (always needed)
-        $this->securityHelper = new SecurityHelper();
-        $this->clientHelper = new ClientHelper($this->securityHelper);
-        // Rate limiting removed - logs always sent
-        $this->tracingHelper = new TracingHelper();
-        $this->errorHelper = new ErrorHelper();
-        $this->dataTransformHelper = new DataTransformHelper();
-        $this->payloadHelper = new PayloadHelper($this->securityHelper);
+    /**
+     * Safely get Laravel version
+     */
+    private function getLaravelVersion(): string
+    {
+        if (function_exists('app')) {
+            try {
+                $app = app();
+                if (method_exists($app, 'version')) {
+                    return $app->version();
+                }
+                // Fallback: try to get from Illuminate\Foundation\Application constant
+                if (defined('Illuminate\Foundation\Application::VERSION')) {
+                    return constant('Illuminate\Foundation\Application::VERSION');
+                }
+                return 'unknown';
+            } catch (\Exception $e) {
+                return 'unknown';
+            }
+        }
+        return 'standalone';
+    }
 
-        // Validate API key and enable SDK
-        if (empty($apiKey) || strlen($apiKey) < 10) {
-            $this->safeLog('warning', 'AllStak SDK disabled: Invalid or empty API key');
-            $this->enabled = false;
-            return;
+    /**
+     * Safely get current request
+     */
+    private function getRequest()
+    {
+        if (function_exists('request')) {
+            try {
+                return request();
+            } catch (\Exception $e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Safely get session ID from request
+     */
+    private function getSessionId($request): ?string
+    {
+        if (!$request) {
+            return null;
         }
 
-        // Create HTTP client for transport
-        $this->httpClient = HttpClient::create([
-            'timeout' => 5,
-            'max_duration' => 10,
-        ]);
-
-        // Initialize async transport (only if enabled)
-        if ($this->enabled) {
-            // Check if config service is bound (Laravel environment with config service available)
-            $useCompression = false; // Disable compression to prevent JSON parsing issues
-            if (function_exists('app') && is_callable(['app', 'bound']) && app()->bound('config')) {
-                $useCompression = config('allstak.use_compression', false);
+        try {
+            // Check if request has session method and session is started
+            if (method_exists($request, 'hasSession') && method_exists($request, 'session')) {
+                if ($request->hasSession()) {
+                    $session = $request->session();
+                    if ($session && method_exists($session, 'getId')) {
+                        return $session->getId();
+                    }
+                }
             }
-            
+        } catch (\Exception $e) {
+            // Session not available (e.g., during console commands, early boot)
+            return null;
+        }
+
+        return null;
+    }
+
+    public function __construct(array $config = [])
+    {
+        $this->apiKey = $config['api_key'] ?? $this->getConfig('allstak.api_key', '');
+        $this->projectId = $config['project_id'] ?? $this->getConfig('allstak.project_id', '');
+        $this->environment = $config['environment'] ?? $this->getConfig('allstak.environment', 'production');
+        $this->endpoint = $config['endpoint'] ?? $this->getConfig('allstak.endpoint', 'http://localhost:8080/api/v2/ingest');
+        $this->enabled = $config['enabled'] ?? $this->getConfig('allstak.enabled', true);
+
+        // Feature flags
+        $this->captureHttp = $config['capture_http'] ?? $this->getConfig('allstak.capture_http', true);
+        $this->captureErrors = $config['capture_errors'] ?? $this->getConfig('allstak.capture_errors', true);
+        $this->captureLogs = $config['capture_logs'] ?? $this->getConfig('allstak.capture_logs', true);
+        $this->captureDatabase = $config['capture_database'] ?? $this->getConfig('allstak.capture_database', true);
+
+        // Performance
+        $this->sampleRate = $config['sample_rate'] ?? $this->getConfig('allstak.sample_rate', 1.0);
+        $this->batchSize = $config['batch_size'] ?? $this->getConfig('allstak.batch_size', 100);
+        $this->flushInterval = ($config['flush_interval'] ?? $this->getConfig('allstak.flush_interval', 5000)) / 1000; // Convert to seconds
+
+        // Privacy
+        $this->sendClientIp = $config['send_client_ip'] ?? $this->getConfig('allstak.send_client_ip', true);
+        $this->anonymizeIp = $config['anonymize_ip'] ?? $this->getConfig('allstak.anonymize_ip', false);
+        $scrubHeadersString = $config['scrub_headers'] ?? $this->getConfig('allstak.scrub_headers', 'Authorization,Cookie');
+        $this->scrubHeaders = array_map('trim', explode(',', $scrubHeadersString));
+
+        // Context
+        $this->tags = $config['tags'] ?? $this->getConfig('allstak.tags', []);
+
+        // Validate configuration
+        if (empty($this->apiKey) || strlen($this->apiKey) < 10) {
+            $this->enabled = false;
+            error_log('AllStak SDK disabled: Invalid or empty API key');
+        }
+
+        if (empty($this->projectId)) {
+            $this->enabled = false;
+            error_log('AllStak SDK disabled: Project ID is required');
+        }
+
+        // Initialize helpers and transport
+        $this->batch = new TelemetryBatchDto();
+        $this->lastFlush = microtime(true);
+
+        if ($this->enabled) {
+            $this->httpClient = HttpClient::create([
+                'timeout' => $config['timeout'] ?? $this->getConfig('allstak.timeout', 5),
+                'headers' => [
+                    'x-api-key' => $this->apiKey,
+                    'Content-Type' => 'application/json',
+                    'X-Project-ID' => $this->projectId,
+                ],
+            ]);
+
             $this->transport = new AsyncHttpTransport(
                 $this->httpClient,
-                $this->apiKey,
-                $useCompression
+                $this->apiKey
             );
         }
     }
 
     /**
-     * Safely log messages without Laravel facades
+     * Check if we should sample this event
      */
-    private function safeLog(string $level, string $message, array $context = []): void
+    private function shouldSample(): bool
     {
-        $logMessage = "AllStak [{$level}]: {$message} " . json_encode($context);
-        error_log($logMessage);
+        return $this->enabled && (mt_rand() / mt_getrandmax()) <= $this->sampleRate;
     }
 
     /**
-     * Check if SDK is enabled (rate limiting removed - always send logs)
-     */
-    private function isAllowed(): bool
-    {
-        if (!$this->enabled) {
-            $this->safeLog('debug', 'AllStak SDK is disabled');
-            return false;
-        }
-        
-        // Rate limiting removed - always allow logs to be sent
-        return true;
-    }
-
-    /**
-     * Generate a unique trace ID for the current request
+     * Generate trace ID
      */
     public function generateTraceId(): string
     {
-        return $this->tracingHelper->generateTraceId();
+        return IdGenerator::generateTraceId();
     }
 
     /**
-     * Capture exception and send to error_logs + http_errors tables
+     * Generate span ID
      */
-    public function captureException(Throwable $exception, ?Request $request = null, ?string $traceId = null): bool
+    public function generateSpanId(): string
     {
-        if (!$this->isAllowed()) {
-            error_log('AllStak captureException blocked - SDK disabled or rate limited');
-            return false;
-        }
-
-        try {
-            $traceId = $traceId ?? $this->generateTraceId();
-            // Safely get request - avoid calling \request() in CLI context
-            if ($request === null) {
-                try {
-                    if (function_exists('request') && \request() !== null) {
-                        $request = \request();
-                    }
-                } catch (\Exception $e) {
-                    // Not in HTTP context, leave request as null
-                }
-            }
-
-            $errorSeverity = $this->clientHelper->determineErrorSeverity($exception);
-            $errorCategory = $this->clientHelper->determineErrorCategory($exception);
-
-            $codeContextLines = $this->clientHelper->getCodeContextLines(
-                $exception->getFile(),
-                $exception->getLine(),
-                5
-            );
-            $maskedCodeContext = $this->securityHelper->maskCodeLines($codeContextLines);  // Likely array
-            $rawMessage = $exception->getMessage() ?: 'Unknown Exception';
-            $securityHelper = $this->securityHelper;  // Assume injected
-            $maskedMessage = $securityHelper->maskExceptionMessage($rawMessage, $exception);  // New helper below
-            // FIXED: json_encode array fields that DTO expects as String (e.g., code_context, tags if nested)
-            $maskedCodeContextJson = json_encode($maskedCodeContext);  // Now a JSON string
-            $tags = $this->errorHelper->extractTags($exception);
-
-            // Main error_logs payload
-            $payload = [
-                'trace_id' => $traceId,
-                'timestamp' => (new \DateTime())->format('c'),
-                'error_type' => $this->errorHelper->mapErrorType($errorCategory),
-                'error_code' => $this->errorHelper->generateErrorCode($exception),
-                'error_message' => $this->payloadHelper->sanitizeString($maskedMessage),  // Now masked + sanitized
-                'error_class' => get_class($exception),
-                'severity' => $errorSeverity,
-                'status' => 'new',
-                'stack_trace' => $this->payloadHelper->sanitizeString($exception->getTraceAsString()),  // From earlier sanitization
-                'source' => 'SDK',
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'ip' => $request ? ($this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip())) : 'unknown',
-                'user_id' => $request ? ($request->user()?->id ?? null) : null,
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && is_callable(['app', 'bound']) && app()->bound('config')) ? \app()->version() : 'cli',
-                'tags' => $tags,  // FIXED: Encode if array (DTO: List<String> will parse JSON array)
-
-                // Additional context - FIXED: code_context as JSON string
-                'additional_data' => [
-                    'file' => $this->payloadHelper->sanitizeString($exception->getFile()),
-                    'line' => $exception->getLine(),
-                    'hostname' => gethostname(),
-                    'code_context' => $maskedCodeContextJson,  // Now string: "[\"masked line1\", ...]"
-                    'memory_usage' => $this->clientHelper->getMemoryUsage(),
-                ],
-
-                // HTTP error details (already has json_encode for headers/body - good)
-                'http_error' => $this->errorHelper->isHttpException($exception) && $request ? [
-                    'http_method' => method_exists($request, 'method') ? $request->method() : 'unknown',
-                    'http_url' => method_exists($request, 'fullUrl') ? $this->securityHelper->sanitizeUrl($request->fullUrl()) : 'unknown',
-                    'http_path' => method_exists($request, 'path') ? $request->path() : 'unknown',
-                    'http_status_code' => $this->errorHelper->getHttpStatusCode($exception),
-                    'http_duration' => null,
-                    'user_agent' => method_exists($request, 'userAgent') ? ($request->userAgent() ?? 'unknown') : 'unknown',
-                    'referer' => method_exists($request, 'header') ? $request->header('referer') : null,
-                    'request_headers' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null ? json_encode($this->clientHelper->transformHeaders($request->headers->all())) : '[]',
-                    'request_body' => method_exists($request, 'all') ? json_encode($this->clientHelper->transformRequestBody($request->all())) : '[]',
-                    'response_headers' => null,  // If array later, json_encode
-                    'response_body' => null,  // If content, truncate + json_encode if object
-                    'is_client_error' => $this->errorHelper->isClientError($exception),
-                    'is_server_error' => $this->errorHelper->isServerError($exception),
-                ] : null,
-
-                // Database error (strings only - good)
-                'database_error' => $this->errorHelper->isDatabaseException($exception) ? [
-                    'query_text' => $this->securityHelper->maskQueryText($this->errorHelper->extractQueryFromException($exception) ?? ''),  // Masked SQL
-                    'database_name' => (function_exists('app') && is_callable(['app', 'bound']) && app()->bound('config')) ? 
-                        config('database.connections.' . config('database.default', 'mysql') . '.database') : 'unknown',
-                    'constraint_violated' => $this->errorHelper->extractConstraintViolation($exception),
-                    // Add masked bindings as JSON (for backend parsing) - only if method exists
-                    'masked_parameters' => json_encode($this->securityHelper->maskDbParameters(
-                        method_exists($exception, 'getBindings') ? $exception->getBindings() : []
-                    )),
-                ] : null,
-
-                // Application error (strings/ints - good)
-                'application_error' => [
-                    'file_path' => $this->payloadHelper->sanitizeString($exception->getFile()),
-                    'line_number' => $exception->getLine(),
-                    'function_name' => $this->payloadHelper->sanitizeString($this->errorHelper->extractFunctionName($exception)),
-                    'class_name' => $this->payloadHelper->sanitizeString($this->errorHelper->extractClassName($exception)),
-                    'exception_type' => get_class($exception),
-                    'is_handled' => true,
-                ],
-            ];
-
-            // FIXED: Sanitize/encode full payload before sending
-            $this->safeLog('debug', 'AllStak Exception Payload prepared', [
-                'trace_id' => $traceId,
-                'error_message_preview' => substr($payload['error_message'], 0, 100) . '...',
-                'db_query_preview' => isset($payload['database_error']) ? substr($payload['database_error']['query_text'], 0, 100) . '...' : 'N/A'
-            ]);
-            
-            $payload = $this->payloadHelper->sanitizePayload($payload);
-            
-            if ($this->transport) {
-                $this->transport->send(self::API_URL . '/errors', $payload);
-                $this->safeLog('debug', 'AllStak Exception sent successfully', ['trace_id' => $traceId]);
-            } else {
-                $this->safeLog('error', 'AllStak transport not initialized');
-                return false;
-            }
-
-            return true;
-        } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send error to AllStak: ' . $e->getMessage());
-            return false;
-        }
+        return IdGenerator::generateSpanId();
     }
 
     /**
-     * Capture HTTP request and send to http_logs table
+     * Get client IP from request
      */
-    public function captureRequest(
-        $request,
-        $response,
-        float $duration,
-        ?string $traceId = null
-    ): bool {
-        if (!$this->isAllowed()) {
-            $this->safeLog('warning', 'AllStak rate limit exceeded or SDK disabled');
-            return false;
+    private function getClientIp(?Request $request): ?string
+    {
+        if (!$request || !$this->sendClientIp) {
+            return null;
         }
 
-        try {
-            $traceId = $traceId ?? $this->generateTraceId();
-            $statusCode = method_exists($response, 'getStatusCode') ? $response->getStatusCode() : 200;
+        $ip = $request->ip();
 
-            $payload = [
-                'trace_id' => $traceId,
-                'timestamp' => (new \DateTime())->format('c'),
-                'ip' => method_exists($request, 'ip') ? ($this->sendIpAddress ? $request->ip() : $this->securityHelper->maskIp($request->ip())) : 'unknown',
-                'http_method' => method_exists($request, 'method') ? $request->method() : 'unknown',
-                'url' => method_exists($request, 'fullUrl') ? $this->securityHelper->sanitizeUrl($request->fullUrl()) : 'unknown',
-                'http_path' => method_exists($request, 'path') ? $request->path() : 'unknown',
-                'status_code' => $statusCode,
-                'duration_ms' => (int)($duration * 1000), // Convert to milliseconds
-                'user_agent' => method_exists($request, 'userAgent') ? ($request->userAgent() ?? 'unknown') : 'unknown',
-                'referer' => method_exists($request, 'header') ? $request->header('referer') : null,
-                'request_headers' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null ? json_encode($this->clientHelper->transformHeaders($request->headers->all())) : '[]',
-                'request_body' => method_exists($request, 'all') ? json_encode($this->clientHelper->transformRequestBody($request->all())) : '[]',
-                'response_headers' => method_exists($response, 'headers') && property_exists($response, 'headers') && $response->headers !== null ? json_encode($response->headers->all()) : null,
-                'response_body' => $this->dataTransformHelper->getResponseBody($response),
-                'response_size' => $this->dataTransformHelper->getResponseSize($response),
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'user_id' => method_exists($request, 'user') ? ($request->user()?->id ?? null) : null,
-                'session_id' => method_exists($request, 'session') ? ($request->session()?->getId()) : null,
-                'success' => $statusCode >= 200 && $statusCode < 400,
-                'cached' => method_exists($request, 'headers') && property_exists($request, 'headers') && $request->headers !== null && is_object($request->headers) && method_exists($request->headers, 'has') ? $request->headers->has('X-Cache-Hit') : false,
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && is_callable(['app', 'bound']) && app()->bound('config')) ? \app()->version() : 'cli',
-            ];
-
-            $this->safeLog('debug', 'AllStak HTTP Request Payload', ['payload' => $payload]);
-
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/http-logs', $payload);
-
-            return true;
-        } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send request to AllStak: ' . $e->getMessage());
-            return false;
+        if ($this->anonymizeIp && $ip) {
+            // Mask last octet for IPv4
+            $parts = explode('.', $ip);
+            if (count($parts) === 4) {
+                $parts[3] = '0';
+                return implode('.', $parts);
+            }
         }
+
+        return $ip;
     }
 
     /**
-     * Send database query log to db_query_logs table
+     * Scrub sensitive headers
      */
-    public function sendDbQuery(
-        string $queryText,
-        array $bindings,
-        float $duration,
-        string $connectionName,
-        ?string $traceId = null,
-        bool $success = true,
-        ?string $errorCode = null,        // ✅ NEW: Error code for failed queries
-        ?string $errorMessage = null,     // ✅ NEW: Error message for failed queries
-        ?string $stackTrace = null        // ✅ NEW: Stack trace for debugging
-    ): bool {
-        if (!$this->isAllowed()) {
-            $this->safeLog('warning', 'AllStak rate limit exceeded or SDK disabled');
-            return false;
-        }
-
-        try {
-            $traceId = $traceId ?? $this->generateTraceId();
-
-            // Safely get request data - check if we're in HTTP context
-            $userId = null;
-            
-            try {
-                if (function_exists('request') && \request() !== null) {
-                    $request = \request();
-                    $userId = $request->user()?->id ?? null;
+    private function scrubSensitiveHeaders(array $headers): array
+    {
+        $scrubbed = [];
+        foreach ($headers as $key => $value) {
+            $shouldScrub = false;
+            foreach ($this->scrubHeaders as $pattern) {
+                if (stripos($key, $pattern) !== false) {
+                    $shouldScrub = true;
+                    break;
                 }
-            } catch (\Exception $e) {
-                // Not in HTTP context, leave request data as null
             }
-
-            $payload = [
-                'trace_id' => $traceId,
-                'timestamp' => (new \DateTime())->format('c'),
-                'query' => $queryText,
-                'query_hash' => md5($queryText),
-                'query_type' => $this->dataTransformHelper->extractQueryType($queryText),
-                'database_name' => (function_exists('app') && app()->bound('config')) ? config("database.connections.{$connectionName}.database") : $connectionName,
-                'table_name' => $this->dataTransformHelper->extractTableName($queryText),
-                'execution_time' => (int)$duration, // milliseconds
-                'rows_affected' => null, // Should be provided from query result
-                'rows_examined' => null,
-                'query_plan' => null,
-                'parameters' => json_encode($bindings),
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'user_id' => $userId,
-                'connection_id' => $connectionName,
-                'is_success' => $success,
-                'is_slow' => $duration > 1000, // Slow if > 1 second
-                'is_cached' => false,
-                'cache_hit' => false,
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli',
-            ];
-
-            // ✅ Add error-specific fields when query fails
-            if (!$success) {
-                $payload['error_code'] = $errorCode ?? 'UNKNOWN';
-                $payload['error_message'] = $errorMessage ?? 'Database query failed';
-                $payload['error_type'] = 'DATABASE_ERROR';
-
-                // Only include stack trace if provided (for security/size reasons)
-                if ($stackTrace) {
-                    $payload['stack_trace'] = $stackTrace;
-                }
-
-                $this->safeLog('debug', 'AllStak DB Query Failed', [
-                    'trace_id' => $traceId,
-                    'error_code' => $errorCode,
-                    'error_message' => substr($errorMessage ?? '', 0, 100) // Log preview
-                ]);
-            }
-
-            $this->safeLog('debug', 'AllStak DB Query Payload', [
-                'trace_id' => $traceId,
-                'success' => $success,
-                'query_type' => $payload['query_type']
-            ]);
-
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/db-queries', $payload);
-
-            return true;
-        } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send DB query to AllStak: ' . $e->getMessage());
-            return false;
+            $scrubbed[$key] = $shouldScrub ? '[REDACTED]' : $value;
         }
+        return $scrubbed;
     }
 
-
     /**
-     * Capture framework logs to framework_logs table
+     * Capture HTTP request (automatic via middleware)
      */
-    public function captureFrameworkLog(
-        string $level,
-        string $message,
-        array $context = [],
-        ?string $traceId = null
-    ): bool {
-        if (!$this->isAllowed()) {
-            $this->safeLog('warning', 'AllStak rate limit exceeded or SDK disabled');
+    public function captureRequest(Request $request, $response, float $duration, ?string $traceId = null, ?string $spanId = null): bool
+    {
+        if (!$this->captureHttp || !$this->shouldSample()) {
             return false;
         }
 
         try {
             $traceId = $traceId ?? SpanContext::getTraceId() ?? $this->generateTraceId();
-            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 5);
-            $caller = $backtrace[1] ?? [];
+            $spanId = $spanId ?? $this->generateSpanId();
 
-            $payload = [
-                'trace_id' => $traceId,
+            $headers = $request->headers->all();
+            $scrubbedHeaders = $this->scrubSensitiveHeaders($headers);
+
+            $dto = new ObservabilityHttpRequestDto([
+                'httpMethod' => $request->method(),
+                'httpUrl' => $request->fullUrl(),
+                'httpStatusCode' => $response->getStatusCode(),
+                'traceId' => $traceId,
+                'spanId' => $spanId,
                 'timestamp' => (new \DateTime())->format('c'),
-                'level' => strtoupper($level),
-                'logger_name' => $context['logger'] ?? 'default',
-                'message' => $message,
-                'context' => json_encode($context),
-                'exception_type' => isset($context['exception']) && $context['exception'] ? get_class($context['exception']) : null,
-                'exception_message' => isset($context['exception']) && $context['exception'] ? $context['exception']->getMessage() : null,
-                'stack_trace' => isset($context['exception']) && $context['exception'] ? $context['exception']->getTraceAsString() : null,
-                'file_path' => $caller['file'] ?? null,
-                'line_number' => $caller['line'] ?? null,
-                'function_name' => $caller['function'] ?? null,
-                'class_name' => $caller['class'] ?? null,
-                'framework_name' => 'laravel',
-                'framework_version' => (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli',
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-            ];
+                'httpPath' => $request->path(),
+                'httpDuration' => (int)($duration * 1000), // Convert to ms
+                'userAgent' => $request->userAgent(),
+                'referer' => $request->header('referer'),
+                'requestHeaders' => json_encode($scrubbedHeaders),
+                'responseHeaders' => json_encode($response->headers->all()),
+                'requestBody' => substr($request->getContent(), 0, 10000), // Truncate to 10k chars
+                'responseBody' => substr($response->getContent(), 0, 10000), // Truncate to 10k chars
+                'clientIp' => $this->getClientIp($request),
+                'userId' => ($user = $request->user()) ? (string)$user->id : null,
+                'sessionId' => $this->getSessionId($request),
+                'attributes' => array_merge($this->tags, [
+                    'service_name' => $this->tags['service_name'] ?? 'laravel-app',
+                    'php_version' => PHP_VERSION,
+                    'laravel_version' => $this->getLaravelVersion(),
+                ]),
+            ]);
 
-            // Safely get request data - check if we're in HTTP context
-            $userId = null;
-            $sessionId = null;
-            $requestId = null;
-            
-            try {
-                if (function_exists('request') && \request() !== null) {
-                    $request = \request();
-                    $userId = $request->user() ? $request->user()->id : null;
-                    $session = $request->session();
-                    $sessionId = $session ? $session->getId() : null;
-                    $requestId = $request->header('X-Request-ID');
-                }
-            } catch (\Exception $e) {
-                // Not in HTTP context, leave request data as null
+            if (!$dto->validate()) {
+                error_log('AllStak: Invalid HTTP request DTO');
+                return false;
             }
 
-            $payload['user_id'] = $userId;
-            $payload['session_id'] = $sessionId;
-            $payload['request_id'] = $requestId;
-            $payload['process_id'] = getmypid();
-            $payload['hostname'] = gethostname();
-            $payload['sdk_version'] = self::SDK_VERSION;
-            $payload['sdk_language'] = 'php';
-            $payload['sdk_platform'] = 'laravel';
-            $payload['php_version'] = PHP_VERSION;
-            $payload['laravel_version'] = (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli';
-
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                $this->safeLog('debug', 'AllStak Framework Log Payload', ['payload' => $payload]);
-            } else {
-                error_log('AllStak Framework Log Payload sent - trace_id: ' . $payload['trace_id']);
-            }
-
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/framework-logs', $payload);
+            $this->batch->addRequest($dto);
+            $this->flushIfNeeded();
 
             return true;
         } catch (\Exception $e) {
-            // Use error_log if Laravel facades are not available
-            if (class_exists('\Illuminate\Support\Facades\Log')) {
-                $this->safeLog('error', 'Failed to send framework log to AllStak: ' . $e->getMessage());
-            } else {
-                error_log('Failed to send framework log to AllStak: ' . $e->getMessage());
-            }
+            error_log('AllStak: Failed to capture request: ' . $e->getMessage());
             return false;
         }
     }
 
     /**
-     * Start a new span for distributed tracing
+     * Capture error/exception (automatic via error handler or manual)
      */
-    public function startSpan(string $name, ?string $parentSpanId = null): Span
+    public function captureError(Throwable $exception, ?Request $request = null, array $context = []): bool
     {
-        $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
-
-        // Create and return a Span object
-        $span = new Span($name, $traceId, $parentSpanId);
-
-        // Store it for later
-        $this->activeSpans[$span->id] = $span;
-
-        return $span;
-    }
-
-    /**
-     * End a span and send to API
-     */
-    public function endSpan(Span $span): bool
-    {
-        if (!$this->enabled) {
-            $this->safeLog('warning', 'AllStak SDK disabled for span');
+        if (!$this->captureErrors || !$this->shouldSample()) {
             return false;
         }
-
-        $span->end(); // Call the Span's end method
 
         try {
-            $payload = [
-                'trace_id' => $span->traceId,
-                'span_id' => $span->id,
-                'parent_span_id' => $span->parentSpanId,
-                'name' => $span->name,
-                'start_time' => $span->startTime,
-                'end_time' => $span->endTime,
-                'duration' => ($span->endTime - $span->startTime) * 1000, // ms
-                'status' => $span->status ?? 'ok',
-                'attributes' => $span->attributes,
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli',
-            ];
+            $traceId = $context['traceId'] ?? SpanContext::getTraceId() ?? $this->generateTraceId();
+            $spanId = $context['spanId'] ?? $this->generateSpanId();
 
-            if ($span->error) {
-                $payload['error'] = $span->error;
+            $dto = new ObservabilityErrorEventDto([
+                'errorType' => get_class($exception),
+                'errorMessage' => substr($exception->getMessage(), 0, 1000),
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'timestamp' => (new \DateTime())->format('c'),
+                'errorClass' => get_class($exception),
+                'severity' => $this->mapSeverity($exception),
+                'status' => 'unresolved',
+                'stackTrace' => $exception->getTraceAsString(),
+                'sourceFile' => $exception->getFile(),
+                'lineNumber' => $exception->getLine(),
+                'handled' => $context['handled'] ?? true,
+                'mechanism' => $context['mechanism'] ?? 'exception_handler',
+                'osName' => PHP_OS,
+                'osVersion' => php_uname('r'),
+                'userId' => $request && ($user = $request->user()) ? (string)$user->id : null,
+                'sessionId' => $this->getSessionId($request),
+                'attributes' => array_merge($this->tags, $context['attributes'] ?? [], [
+                    'php_version' => PHP_VERSION,
+                    'laravel_version' => $this->getLaravelVersion(),
+                ]),
+            ]);
+
+            // Add HTTP context if available
+            if ($request) {
+                $dto->httpMethod = $request->method();
+                $dto->httpUrl = $request->fullUrl();
+                if (method_exists($exception, 'getStatusCode')) {
+                    $dto->httpStatusCode = $exception->getStatusCode();
+                }
             }
 
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/spans', $payload);
+            if (!$dto->validate()) {
+                error_log('AllStak: Invalid error DTO');
+                return false;
+            }
 
-            unset($this->activeSpans[$span->id]);
+            $this->batch->addError($dto);
+            $this->flushIfNeeded();
+
             return true;
         } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send span: ' . $e->getMessage());
+            error_log('AllStak: Failed to capture error: ' . $e->getMessage());
             return false;
         }
     }
 
     /**
-     * Add attributes to a span
+     * Manual logging (AllStak::log())
      */
-    public function addSpanAttribute(string $spanId, string $key, $value): void
+    public function log(string $level, string $message, array $attributes = []): bool
     {
-        if (isset($this->activeSpans[$spanId])) {
-            $this->activeSpans[$spanId]->attributes[$key] = $value;
-        }
-    }
-
-    /**
-     * Add a span directly (for backward compatibility with QuerySpanLogger)
-     */
-    public function addSpan(string $name, float $startTime, float $endTime, array $attributes = []): bool
-    {
-        if (!$this->enabled) {
-            $this->safeLog('warning', 'AllStak SDK disabled for span');
+        if (!$this->captureLogs || !$this->shouldSample()) {
             return false;
         }
 
         try {
             $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+            $spanId = $this->generateSpanId();
 
-            $payload = [
-                'trace_id' => $traceId,
-                'span_id' => bin2hex(random_bytes(8)),
-                'parent_span_id' => null,
-                'name' => $name,
-                'start_time' => $startTime,
-                'end_time' => $endTime,
-                'duration' => ($endTime - $startTime) * 1000, // Convert to milliseconds
-                'status' => 'ok',
-                'attributes' => $attributes,
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli',
-            ];
+            $dto = new ObservabilityApplicationLogDto([
+                'level' => strtoupper($level),
+                'logSource' => 'application',
+                'message' => substr($message, 0, 5000),
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'timestamp' => (new \DateTime())->format('c'),
+                'severityNumber' => $this->mapLogLevel($level),
+                'severityText' => strtoupper($level),
+                'processId' => getmypid(),
+                'userId' => ($req = $this->getRequest()) && ($user = $req->user()) ? (string)$user->id : null,
+                'sessionId' => $this->getSessionId($this->getRequest()),
+                'attributes' => array_merge($this->tags, $attributes, [
+                    'php_version' => PHP_VERSION,
+                    'laravel_version' => $this->getLaravelVersion(),
+                ]),
+            ]);
 
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/spans', $payload);
+            if (!$dto->validate()) {
+                error_log('AllStak: Invalid log DTO');
+                return false;
+            }
+
+            $this->batch->addLog($dto);
+            $this->flushIfNeeded();
 
             return true;
         } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send span to AllStak: ' . $e->getMessage());
+            error_log('AllStak: Failed to capture log: ' . $e->getMessage());
             return false;
         }
     }
 
     /**
-     * Manually flush pending events (useful for CLI scripts)
+     * Capture database query (automatic via query listener)
      */
-    public function flush(int $timeout = 2): void
+    public function captureQuery(string $sql, array $bindings, float $duration, string $connection, bool $success = true, ?string $errorMessage = null): bool
     {
-        if ($this->enabled && $this->transport) {
-            $this->transport->flush($timeout);
+        if (!$this->captureDatabase || !$this->shouldSample()) {
+            return false;
+        }
+
+        try {
+            $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+            $spanId = $this->generateSpanId();
+
+            $dbConfig = $this->getConfig("database.connections.{$connection}", []);
+
+            $dto = new ObservabilityDatabaseQueryDto([
+                'dbSystem' => $dbConfig['driver'] ?? 'mysql',
+                'dbOperation' => $this->extractOperation($sql),
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'timestamp' => (new \DateTime())->format('c'),
+                'dbStatement' => substr($sql, 0, 10000),
+                'dbTable' => $this->extractTable($sql),
+                'dbName' => $dbConfig['database'] ?? null,
+                'dbHost' => $dbConfig['host'] ?? null,
+                'dbPort' => $dbConfig['port'] ?? null,
+                'queryDuration' => (int)$duration,
+                'querySuccess' => $success,
+                'errorMessage' => $errorMessage,
+                'userId' => ($req = $this->getRequest()) && ($user = $req->user()) ? (string)$user->id : null,
+                'sessionId' => $this->getSessionId($this->getRequest()),
+                'attributes' => array_merge($this->tags, [
+                    'bindings' => json_encode($bindings),
+                    'connection' => $connection,
+                ]),
+            ]);
+
+            if (!$dto->validate()) {
+                error_log('AllStak: Invalid query DTO');
+                return false;
+            }
+
+            $this->batch->addQuery($dto);
+            $this->flushIfNeeded();
+
+            return true;
+        } catch (\Exception $e) {
+            error_log('AllStak: Failed to capture query: ' . $e->getMessage());
+            return false;
         }
     }
 
-    // Helper methods (unchanged)
+    /**
+     * Start a custom span (manual instrumentation)
+     */
+    public function startSpan(string $name, ?string $parentSpanId = null): array
+    {
+        $traceId = SpanContext::getTraceId() ?? $this->generateTraceId();
+        $spanId = $this->generateSpanId();
+
+        $span = [
+            'spanName' => $name,
+            'spanKind' => 'INTERNAL',
+            'traceId' => $traceId,
+            'spanId' => $spanId,
+            'timestamp' => (new \DateTime())->format('c'),
+            'parentSpanId' => $parentSpanId,
+            'startTime' => microtime(true),
+            'attributes' => [],
+        ];
+
+        $this->activeSpans[$spanId] = $span;
+        SpanContext::setTraceId($traceId);
+
+        return $span;
+    }
 
     /**
-     * Destructor ensures pending requests are flushed
+     * End a custom span
+     */
+    public function endSpan(array $span, string $status = 'OK', ?string $statusMessage = null): bool
+    {
+        try {
+            $endTime = microtime(true);
+            $duration = (int)(($endTime - $span['startTime']) * 1000); // ms
+
+            $dto = new ObservabilitySpanDto([
+                'spanName' => $span['spanName'],
+                'spanKind' => $span['spanKind'],
+                'traceId' => $span['traceId'],
+                'spanId' => $span['spanId'],
+                'timestamp' => $span['timestamp'],
+                'parentSpanId' => $span['parentSpanId'],
+                'duration' => $duration,
+                'statusCode' => $status,
+                'statusMessage' => $statusMessage,
+                'attributes' => array_merge($this->tags, $span['attributes']),
+            ]);
+
+            if (!$dto->validate()) {
+                error_log('AllStak: Invalid span DTO');
+                return false;
+            }
+
+            $this->batch->addSpan($dto);
+            $this->flushIfNeeded();
+
+            unset($this->activeSpans[$span['spanId']]);
+
+            return true;
+        } catch (\Exception $e) {
+            error_log('AllStak: Failed to end span: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Flush batch if needed
+     */
+    private function flushIfNeeded(): void
+    {
+        $currentTime = microtime(true);
+        $timeSinceLastFlush = $currentTime - $this->lastFlush;
+
+        $totalEvents = count($this->batch->logs) + count($this->batch->errors) +
+                       count($this->batch->requests) + count($this->batch->queries) +
+                       count($this->batch->spans);
+
+        if ($totalEvents >= $this->batchSize || $timeSinceLastFlush >= $this->flushInterval) {
+            $this->flush();
+        }
+    }
+
+    /**
+     * Manually flush batch
+     */
+    public function flush(): bool
+    {
+        if ($this->batch->isEmpty() || !$this->transport) {
+            return true;
+        }
+
+        try {
+            $this->transport->send($this->endpoint . '/batch', $this->batch->toArray());
+            $this->batch = new TelemetryBatchDto();
+            $this->lastFlush = microtime(true);
+            return true;
+        } catch (\Exception $e) {
+            error_log('AllStak: Failed to flush batch: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Map exception to severity
+     */
+    private function mapSeverity(Throwable $exception): string
+    {
+        if ($exception instanceof \Error) {
+            return 'fatal';
+        }
+
+        if (method_exists($exception, 'getStatusCode')) {
+            $code = $exception->getStatusCode();
+            if ($code >= 500) return 'error';
+            if ($code >= 400) return 'warning';
+        }
+
+        return 'error';
+    }
+
+    /**
+     * Map log level to OpenTelemetry severity number
+     */
+    private function mapLogLevel(string $level): int
+    {
+        $map = [
+            'trace' => 1,
+            'debug' => 5,
+            'info' => 9,
+            'warn' => 13,
+            'warning' => 13,
+            'error' => 17,
+            'fatal' => 21,
+            'critical' => 21,
+        ];
+
+        return $map[strtolower($level)] ?? 9;
+    }
+
+    /**
+     * Extract SQL operation type
+     */
+    private function extractOperation(string $sql): string
+    {
+        if (preg_match('/^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE)/i', $sql, $matches)) {
+            return strtoupper($matches[1]);
+        }
+        return 'UNKNOWN';
+    }
+
+    /**
+     * Extract table name from SQL
+     */
+    private function extractTable(string $sql): ?string
+    {
+        if (preg_match('/(?:FROM|INTO|UPDATE|TABLE)\s+`?(\w+)`?/i', $sql, $matches)) {
+            return $matches[1];
+        }
+        return null;
+    }
+
+    /**
+     * Destructor - flush remaining events
      */
     public function __destruct()
     {
         $this->flush();
     }
-
-    /**
-     * Send a log message to AllStak backend
-     */
-    public function log(string $level, string $message, array $context = [], ?string $traceId = null): bool
-    {
-        if (!$this->isAllowed()) {
-            return false;
-        }
-
-        try {
-            $traceId = $traceId ?? $this->generateTraceId();
-
-            // Safely get request data - check if we're in HTTP context
-            $request = null;
-            $userId = null;
-            $sessionId = null;
-            $requestId = null;
-            
-            try {
-                if (function_exists('request') && \request() !== null) {
-                    $request = \request();
-                    $userId = $request->user() ? $request->user()->id : null;
-                    $session = $request->session();
-                    $sessionId = $session ? $session->getId() : null;
-                    $requestId = $request->header('X-Request-ID');
-                }
-            } catch (\Exception $e) {
-                // Not in HTTP context, leave request data as null
-            }
-
-            // Debug: Check if helpers are available
-            if (!isset($this->payloadHelper)) {
-                $this->safeLog('error', 'PayloadHelper not initialized');
-                return false;
-            }
-
-            $this->safeLog('debug', 'AllStak log method - preparing payload');
-
-            $payload = [
-                'trace_id' => $traceId,
-                'level' => strtolower($level),
-                'message' => $this->payloadHelper->sanitizeString($message),
-                'context' => $this->payloadHelper->sanitizePayload($context),
-                'timestamp' => (new \DateTime())->format('c'),
-                'service_name' => $this->serviceName,
-                'environment' => $this->environment,
-                'user_id' => $userId,
-                'session_id' => $sessionId,
-                'request_id' => $requestId,
-                'process_id' => getmypid(),
-                'hostname' => gethostname(),
-                'sdk_version' => self::SDK_VERSION,
-                'sdk_language' => 'php',
-                'sdk_platform' => 'laravel',
-                'php_version' => PHP_VERSION,
-                'laravel_version' => (function_exists('app') && app()->bound('config')) ? \app()->version() : 'cli',
-            ];
-
-            $this->safeLog('debug', 'AllStak log method - payload prepared');
-
-            // Debug: Check if transport is available
-            if (!isset($this->transport)) {
-                $this->safeLog('error', 'Transport not initialized');
-                return false;
-            }
-
-            $this->safeLog('debug', 'AllStak log method - sending to transport');
-
-            // Use async transport (non-blocking)
-            $this->transport->send(self::API_URL . '/logs', $payload);
-
-            $this->safeLog('debug', 'AllStak log method - transport send completed');
-
-            return true;
-        } catch (\Exception $e) {
-            $this->safeLog('error', 'Failed to send log to AllStak: ' . $e->getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Log debug message
-     */
-    public function logDebug(string $message, array $context = [], ?string $traceId = null): bool
-    {
-        return $this->log('debug', $message, $context, $traceId);
-    }
-
-    /**
-     * Log info message
-     */
-    public function logInfo(string $message, array $context = [], ?string $traceId = null): bool
-    {
-        return $this->log('info', $message, $context, $traceId);
-    }
-
-    /**
-     * Log warning message
-     */
-    public function logWarning(string $message, array $context = [], ?string $traceId = null): bool
-    {
-        return $this->log('warning', $message, $context, $traceId);
-    }
-
-    /**
-     * Log error message
-     */
-    public function logError(string $message, array $context = [], ?string $traceId = null): bool
-    {
-        return $this->log('error', $message, $context, $traceId);
-    }
 }
+

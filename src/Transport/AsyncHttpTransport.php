@@ -38,9 +38,11 @@ class AsyncHttpTransport
             $headers = [
                 'x-api-key' => $this->apiKey,
                 'Accept' => 'application/json',
-                'Content-Type' => 'application/json', // Forces Tomcat/Spring to parse as JSON body, not form params
-                'User-Agent' => Version::getUserAgent(),
-                'X-AllStak-SDK-Version' => Version::get(),
+                'Content-Type' => 'application/json',
+                'User-Agent' => 'AllStak-Laravel-SDK/2.0.0',
+                'X-SDK-Version' => '2.0.0',
+                'X-SDK-Language' => 'php',
+                'X-SDK-Platform' => 'laravel',
             ];
 
             $options = [];

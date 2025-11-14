@@ -18,11 +18,23 @@ class AllStakMiddleware
 
     public function handle(Request $request, Closure $next)
     {
-        // Generate or get trace ID
-        $traceId = $request->header('X-Trace-ID') ?? $this->client->generateTraceId();
-        SpanContext::setTraceId($traceId);
+        // Check if path should be excluded
+        $excludedPaths = explode(',', config('allstak.excluded_paths', ''));
+        foreach ($excludedPaths as $path) {
+            if ($request->is(trim($path))) {
+                return $next($request);
+            }
+        }
 
-        // Add trace ID to response headers
+        // Generate or extract trace ID from headers
+        $traceId = $request->header('X-Trace-ID') ??
+                   $request->header('traceparent') ??
+                   $this->client->generateTraceId();
+
+        $spanId = $this->client->generateSpanId();
+
+        // Set trace context
+        SpanContext::setTraceId($traceId);
         $request->headers->set('X-Trace-ID', $traceId);
 
         $startTime = microtime(true);
@@ -32,24 +44,30 @@ class AllStakMiddleware
 
             $duration = microtime(true) - $startTime;
 
-            // Log successful request
-            $this->client->captureRequest($request, $response, $duration, $traceId);
+            // Capture successful request
+            $this->client->captureRequest($request, $response, $duration, $traceId, $spanId);
 
-            // Add trace ID to response
+            // Add trace ID to response headers
             if (method_exists($response, 'header')) {
                 $response->header('X-Trace-ID', $traceId);
             }
 
             return $response;
-        } catch (\Throwable $exception) {
+        } catch (\Throwable $e) {
             $duration = microtime(true) - $startTime;
 
-            // Log error with same trace ID
-            $this->client->captureException($exception, $request, $traceId);
+            // Capture error
+            $this->client->captureError($e, $request, [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'handled' => false,
+                'mechanism' => 'middleware',
+            ]);
 
-            throw $exception;
+            throw $e;
         } finally {
             SpanContext::clear();
         }
     }
 }
+

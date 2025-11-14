@@ -3,16 +3,14 @@
 namespace AllStak;
 
 use AllStak\AllStakClient;
-use AllStak\Helpers\SecurityHelper;  // Confirmed import for binding
-use AllStak\Logging\AllStakLogChannel;
+use AllStak\Logging\AllStakLogHandler;
+use AllStak\Middleware\AllStakMiddleware;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Database\Events\QueryExecuted;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
-use AllStak\Middleware\AllStakTracingMiddleware;
-use AllStak\Tracing\DBSpanRecorder;
+use Monolog\Logger;
 
 class AllStakServiceProvider extends ServiceProvider
 {
@@ -25,30 +23,10 @@ class AllStakServiceProvider extends ServiceProvider
 
         // Bind AllStakClient as singleton
         $this->app->singleton(AllStakClient::class, function ($app) {
-            $config = $app['config']['allstak'];
-            return new AllStakClient(
-                $config['api_key'] ?? env('ALLSTAK_API_KEY', ''),
-                $config['environment'] ?? env('ALLSTAK_ENV', \app()->environment()),
-                $config['SEND_IP_ADDRESS'] ?? env('ALLSTAK_SEND_IP_ADDRESS', true),
-                $config['service_name'] ?? env('ALLSTAK_SERVICE_NAME', config('app.name'))
-            );
+            return new AllStakClient($app['config']['allstak']);
         });
 
         $this->app->alias(AllStakClient::class, 'allstak');
-
-        // Bind SecurityHelper
-        $this->app->singleton(SecurityHelper::class, function ($app) {
-            return new SecurityHelper();
-        });
-
-        // Bind DBSpanRecorder as singleton
-        $this->app->singleton(DBSpanRecorder::class, function ($app) {
-            return new DBSpanRecorder(
-                $app->make(AllStakClient::class),
-                $app->make(SecurityHelper::class)
-            );
-        });
-
     }
 
     public function boot()
@@ -58,127 +36,78 @@ class AllStakServiceProvider extends ServiceProvider
             __DIR__ . '/../config/AllStakConfig.php' => config_path('allstak.php')
         ], 'allstak-config');
 
-        // Register custom log channel in boot method
-        $this->app['log']->extend('allstak', function ($app, $config) {
-            return (new AllStakLogChannel())($config);
-        });
-
         // Check if SDK is enabled
         if (!config('allstak.enabled', true)) {
-            Log::info('AllStak SDK is disabled in config');
             return;
         }
 
+        $client = $this->app->make(AllStakClient::class);
+
         try {
-            // 1. HTTP request span (global middleware)
-            $this->app['router']->pushMiddlewareToGroup('web', AllStakTracingMiddleware::class);
-            $this->app['router']->pushMiddlewareToGroup('api', AllStakTracingMiddleware::class);
-
-            // 2. Listen for SUCCESSFUL queries
-            if ($this->app->bound(AllStakClient::class) && $this->app->bound(SecurityHelper::class)) {
-                DB::listen(function (QueryExecuted $query) {
-                    try {
-                        $recorder = $this->app->make(DBSpanRecorder::class);
-                        $recorder->record($query);
-                    } catch (\Exception $e) {
-                        Log::error('AllStak: Failed to record successful query', [
-                            'error' => $e->getMessage()
-                        ]);
-                    }
-                });
-
-                Log::info('AllStak DB tracing enabled');
+            // 1. Register HTTP middleware for automatic request tracking
+            if (config('allstak.capture_http', true)) {
+                $this->app['router']->pushMiddlewareToGroup('web', AllStakMiddleware::class);
+                $this->app['router']->pushMiddlewareToGroup('api', AllStakMiddleware::class);
             }
 
-            // 3. ✅ FIXED: Register failed query handler using reportable
-            $this->registerFailedQueryHandler();
+            // 2. Register database query listener for automatic query tracking
+            if (config('allstak.capture_database', true)) {
+                DB::listen(function (QueryExecuted $query) use ($client) {
+                    try {
+                        $client->captureQuery(
+                            $query->sql,
+                            $query->bindings,
+                            $query->time,
+                            $query->connectionName
+                        );
+                    } catch (\Exception $e) {
+                        error_log('AllStak: Failed to capture query: ' . $e->getMessage());
+                    }
+                });
+            }
+
+            // 3. Register custom log handler for automatic log capture
+            if (config('allstak.capture_logs', true)) {
+                $this->app['log']->extend('allstak', function ($app, $config) use ($client) {
+                    $handler = new AllStakLogHandler($client, Logger::DEBUG);
+                    return new Logger('allstak', [$handler]);
+                });
+            }
+
+            // 4. Register global exception handler for automatic error tracking
+            if (config('allstak.capture_errors', true)) {
+                $this->registerExceptionHandler($client);
+            }
 
         } catch (\Exception $e) {
-            Log::error('AllStak boot failed: ' . $e->getMessage(), [
-                'trace' => $e->getTraceAsString()
-            ]);
+            error_log('AllStak boot failed: ' . $e->getMessage());
         }
-
-        Log::info('AllStak SDK booted successfully');
     }
 
     /**
-     * ✅ Register handler for failed database queries
+     * Register exception handler for automatic error tracking
      */
-    protected function registerFailedQueryHandler()
+    protected function registerExceptionHandler(AllStakClient $client)
     {
         try {
-            // Get the exception handler instance
             $handler = $this->app->make(ExceptionHandler::class);
 
-            // Check if reportable method exists (Laravel 8+)
             if (method_exists($handler, 'reportable')) {
-                $handler->reportable(function (QueryException $exception) {
+                $handler->reportable(function (\Throwable $exception) use ($client) {
                     try {
-                        Log::info('AllStak: QueryException caught', [
-                            'code' => $exception->getCode(),
-                            'message' => substr($exception->getMessage(), 0, 100)
-                        ]);
-
-                        $recorder = $this->app->make(DBSpanRecorder::class);
-                        $recorder->recordFailedQuery($exception);
-
-                        Log::info('AllStak: Failed query recorded successfully');
+                        $request = null;
+                        if (function_exists('request') && request() !== null) {
+                            $request = request();
+                        }
+                        $client->captureError($exception, $request);
                     } catch (\Exception $e) {
-                        Log::error('AllStak: Failed to record database error', [
-                            'error' => $e->getMessage(),
-                            'trace' => $e->getTraceAsString()
-                        ]);
+                        error_log('AllStak: Failed to capture error: ' . $e->getMessage());
                     }
-
-                    // IMPORTANT: Don't return false, let Laravel handle exception normally
-                });
-
-                Log::info('AllStak: QueryException handler registered via reportable()');
-            } else {
-                Log::warning('AllStak: reportable() not available, using alternative method');
-
-                // ✅ ALTERNATIVE: Use extending the handler (works in older Laravel versions)
-                $this->app->extend(ExceptionHandler::class, function ($handler, $app) {
-                    return new class($handler, $app) extends \Illuminate\Foundation\Exceptions\Handler {
-                        private $original;
-                        private $app;
-
-                        public function __construct($original, $app) {
-                            $this->original = $original;
-                            $this->app = $app;
-                            parent::__construct($app);
-                        }
-
-                        public function report(\Throwable $exception)
-                        {
-                            if ($exception instanceof QueryException) {
-                                try {
-                                    $recorder = $this->app->make(DBSpanRecorder::class);
-                                    $recorder->recordFailedQuery($exception);
-                                    Log::info('AllStak: Failed query recorded via extended handler');
-                                } catch (\Exception $e) {
-                                    Log::error('AllStak: Failed in extended handler', [
-                                        'error' => $e->getMessage()
-                                    ]);
-                                }
-                            }
-
-                            return $this->original->report($exception);
-                        }
-
-                        public function render($request, \Throwable $exception)
-                        {
-                            return $this->original->render($request, $exception);
-                        }
-                    };
                 });
             }
         } catch (\Exception $e) {
-            Log::error('AllStak: Failed to register query exception handler', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
+            error_log('AllStak: Failed to register exception handler: ' . $e->getMessage());
         }
     }
 }
+

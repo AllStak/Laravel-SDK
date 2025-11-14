@@ -4,39 +4,57 @@ namespace AllStak\Logging;
 
 use AllStak\AllStakClient;
 use Monolog\Handler\AbstractProcessingHandler;
+use Monolog\Logger;
 use Monolog\LogRecord;
 
 class AllStakLogHandler extends AbstractProcessingHandler
 {
-    private AllStakClient $allStakClient;
+    private AllStakClient $client;
 
-    public function __construct(AllStakClient $allStakClient, $level = \Monolog\Logger::DEBUG, bool $bubble = true)
+    public function __construct(AllStakClient $client, $level = Logger::DEBUG, bool $bubble = true)
     {
         parent::__construct($level, $bubble);
-        $this->allStakClient = $allStakClient;
+        $this->client = $client;
     }
 
     /**
-     * Writes the record down to the log of the implementing handler
+     * Write log record to AllStak
+     *
+     * @param array|LogRecord $record
+     * @return void
      */
-    protected function write(LogRecord $record): void
+    protected function write($record): void
     {
-        $context = $record->context;
-        
-        // Extract trace ID if present
-        $traceId = $context['trace_id'] ?? null;
-        if (isset($context['trace_id'])) {
-            unset($context['trace_id']);
+        // Handle both old array format and new LogRecord format
+        if ($record instanceof LogRecord) {
+            $level = $record->level->getName();
+            $message = $record->message;
+            $context = $record->context;
+        } else {
+            $level = $record['level_name'] ?? 'INFO';
+            $message = $record['message'] ?? '';
+            $context = $record['context'] ?? [];
         }
 
-        // Map Monolog levels to AllStak levels
-        $level = strtolower($record->level->getName());
-        
+        // Map Monolog level to our level format
+        $levelMap = [
+            'DEBUG' => 'debug',
+            'INFO' => 'info',
+            'NOTICE' => 'info',
+            'WARNING' => 'warn',
+            'ERROR' => 'error',
+            'CRITICAL' => 'fatal',
+            'ALERT' => 'fatal',
+            'EMERGENCY' => 'fatal',
+        ];
+
+        $mappedLevel = $levelMap[$level] ?? 'info';
+
         try {
-            // Use the public log method directly instead of reflection
-            $this->allStakClient->log($level, $record->message, $context, $traceId);
+            $this->client->log($mappedLevel, $message, $context);
         } catch (\Exception $e) {
-            error_log('AllStak logging failed: ' . $e->getMessage());
+            error_log('AllStak: Failed to send log: ' . $e->getMessage());
         }
     }
 }
+
